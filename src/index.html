@@ -32,7 +32,269 @@ body {
 /* __DATA__ */
 
 /* === CALC ENGINE === */
-/* TODO: P2 で実装 — runCalc, runParentCalc */
+
+/* --- 定数・ヘルパー --- */
+const SIZES_CVT = [8, 14, 22, 38, 60, 100, 150, 200, 250, 325];
+const SIZES_CV  = [2, 3.5, 5.5, 8, 14, 22, 38, 60, 100, 150, 200, 250, 325];
+
+function getCableSizes(ct) {
+  return (ct === 'CVT' || ct === 'CVD') ? SIZES_CVT : SIZES_CV;
+}
+
+function getImpTable(ct) {
+  return (ct === 'CVT' || ct === 'CVD') ? IMP_CVT : IMP_CV;
+}
+
+function getAmpTable(wm) {
+  const m = { 'ケーブルラック配線': A_RACK, '配管配線': A_COND, '直埋布設': A_DIRECT, '管路布設': A_DUCT };
+  return m[wm] || A_RACK;
+}
+
+/** 基本許容電流を取得。データ未整備の場合は null */
+function getBaseAmpacity(ct, wm, sz) {
+  const t = getAmpTable(wm)[ct];
+  if (!t) return null;
+  const i = t.sizes_mm2.indexOf(sz);
+  return (i >= 0 && i < t.ampacity.length) ? t.ampacity[i] : null;
+}
+
+/** インピーダンス [R, X] を取得 */
+function getImpedance(ct, freq, sz) {
+  const t = getImpTable(ct);
+  return (t[freq] && t[freq][String(sz)]) || null;
+}
+
+/** 温度補正係数（線形補間対応） */
+function getTempFactor(wm, temp) {
+  const env = (wm === '直埋布設' || wm === '管路布設') ? 'ground' : 'air';
+  const f = TC[env].factors;
+  const ts = Object.keys(f).map(Number).sort((a, b) => a - b);
+  if (temp <= ts[0]) return f[ts[0]];
+  if (temp >= ts[ts.length - 1]) return f[ts[ts.length - 1]];
+  for (let i = 0; i < ts.length - 1; i++) {
+    if (temp >= ts[i] && temp <= ts[i + 1]) {
+      return f[ts[i]] + (f[ts[i + 1]] - f[ts[i]]) * (temp - ts[i]) / (ts[i + 1] - ts[i]);
+    }
+  }
+  return 1.0;
+}
+
+/** 電圧降下の方式係数 K と基準電圧 (§8-4) */
+function getVdParams(sys, V) {
+  switch (sys) {
+    case '単相2線式': return { K: 2, baseV: V };
+    case '単相3線式': return { K: 1, baseV: 100 };
+    case '三相3線式': return { K: Math.sqrt(3), baseV: V };
+    case '三相4線式': return { K: 1, baseV: V / Math.sqrt(3) };
+    default: return { K: Math.sqrt(3), baseV: V };
+  }
+}
+
+/** 許容電圧降下率 [%] (§8-5) */
+function getAllowVdP(L, sup) {
+  const h = sup === '高圧受電';
+  if (L <= 60)  return h ? 3 : 2;
+  if (L <= 120) return h ? 5 : 4;
+  if (L <= 200) return h ? 6 : 5;
+  return h ? 7 : 6;
+}
+
+/** MCCB 自動選定 (§8-6) */
+function selectMCCB(dI, circuitType) {
+  const th = circuitType === '電動機' ? dI * 1.25 : dI;
+  for (const at of MCCB_AT) { if (at >= th) return at; }
+  return MCCB_AT[MCCB_AT.length - 1];
+}
+
+function isThreePhase(sys) {
+  return sys === '三相3線式' || sys === '三相4線式';
+}
+
+/** 丸めユーティリティ */
+function rd(v, n = 2) { const m = Math.pow(10, n); return Math.round(v * m) / m; }
+
+/**
+ * runCalc — 子回路のケーブルサイズ選定 (§8)
+ *
+ * @param {Object} p - 入力パラメータ
+ * @returns {Object} 計算結果（ok, size, dI, sizingI, mccbAT, 各判定フラグ等）
+ */
+function runCalc(p) {
+  /* 8-1: 設計電流 */
+  const V = p.voltage, PF = p.powerFactor, EFF = p.efficiency;
+  const three = isThreePhase(p.system);
+  let rawI;
+  if (p.unit === 'kW') {
+    rawI = three
+      ? p.capacity * 1000 / (Math.sqrt(3) * V * PF * EFF)
+      : p.capacity * 1000 / (V * PF * EFF);
+  } else if (p.unit === 'kVA') {
+    rawI = three
+      ? p.capacity * 1000 / (Math.sqrt(3) * V)
+      : p.capacity * 1000 / V;
+  } else {
+    rawI = p.capacity;
+  }
+  const dI = rawI * p.demandFactor / 100;
+
+  /* 8-2: 電動機電流補正 */
+  const sizingI = p.circuitType === '電動機'
+    ? (dI <= 50 ? dI * 1.25 : dI * 1.1)
+    : dI;
+
+  /* 電圧降下パラメータ */
+  const { K, baseV } = getVdParams(p.system, V);
+  const sinT = Math.sqrt(1 - PF * PF);
+  const allowVdP = getAllowVdP(p.cableLength, p.supplyType);
+
+  /* 温度補正 */
+  const tF = getTempFactor(p.wiringMethod, p.ambientTemp);
+
+  /* MCCB（ケーブルサイズに依存しないため先に決定） */
+  const mccbAT = p.mccbATOverride !== '自動'
+    ? Number(p.mccbATOverride)
+    : selectMCCB(dI, p.circuitType);
+
+  const sizes = getCableSizes(p.cableType);
+
+  /* 8-3: 3条件走査 — 許容電流→電圧降下→保護協調 */
+  for (const sz of sizes) {
+    /* Step 1: 許容電流 */
+    const bA = getBaseAmpacity(p.cableType, p.wiringMethod, sz);
+    if (bA === null) continue;
+    const eA = bA * tF * p.reductionFactor;
+    if (eA < sizingI) continue;
+
+    /* Step 2: 電圧降下（精密式 R·cosθ + X·sinθ） */
+    const imp = getImpedance(p.cableType, p.freq, sz);
+    if (!imp) continue;
+    const Z = imp[0] * PF + imp[1] * sinT;
+    const vd = K * dI * (p.cableLength / 1000) * Z;
+    const vdP = baseV > 0 ? vd / baseV * 100 : 0;
+    if (vdP > allowVdP) continue;
+
+    /* Step 3: 保護協調 */
+    const protOK = p.circuitType === '電動機' ? eA >= mccbAT / 2.5 : eA >= mccbAT;
+    if (!protOK) continue;
+
+    return {
+      ok: true, size: sz, dI: rd(dI), sizingI: rd(sizingI), mccbAT,
+      baseAmpacity: bA, tempFactor: rd(tF, 3), reductionFactor: p.reductionFactor,
+      effectiveAmpacity: rd(eA), Z: rd(Z, 4), K,
+      vd: rd(vd), vdPercent: rd(vdP),
+      allowVd: rd(baseV * allowVdP / 100), allowVdPercent: allowVdP,
+      ampacityOK: true, vdOK: true, protOK: true
+    };
+  }
+
+  /* 全サイズ不適合 — 最大サイズで NG 結果を返す */
+  const sz = sizes[sizes.length - 1];
+  const bA = getBaseAmpacity(p.cableType, p.wiringMethod, sz);
+  const eA = bA !== null ? bA * tF * p.reductionFactor : 0;
+  const imp = getImpedance(p.cableType, p.freq, sz);
+  const Z = imp ? imp[0] * PF + imp[1] * sinT : 0;
+  const vd = K * dI * (p.cableLength / 1000) * Z;
+  const vdP = baseV > 0 ? vd / baseV * 100 : 0;
+
+  return {
+    ok: false, size: sz, dI: rd(dI), sizingI: rd(sizingI), mccbAT,
+    baseAmpacity: bA || 0, tempFactor: rd(tF, 3), reductionFactor: p.reductionFactor,
+    effectiveAmpacity: rd(eA), Z: rd(Z, 4), K,
+    vd: rd(vd), vdPercent: rd(vdP),
+    allowVd: rd(baseV * allowVdP / 100), allowVdPercent: allowVdP,
+    ampacityOK: eA >= sizingI, vdOK: vdP <= allowVdP,
+    protOK: p.circuitType === '電動機' ? eA >= mccbAT / 2.5 : eA >= mccbAT
+  };
+}
+
+/**
+ * runParentCalc — 親幹線のケーブルサイズ選定 (§9)
+ *
+ * @param {Array} children - 子回路の配列 [{ params, result }, ...]
+ * @param {Object} cfg - 親幹線設定（cableLength, powerFactor, cableType, wiringMethod, ambientTemp, reductionFactor, mccbATOverride）
+ * @returns {Object|null} 計算結果。children が空なら null
+ */
+function runParentCalc(children, cfg) {
+  if (!children || children.length === 0) return null;
+
+  /* 子回路の電気方式等を継承 */
+  const first = children[0].params;
+  const sys = first.system, V = first.voltage, freq = first.freq, sup = first.supplyType;
+
+  /* 9-3: 設計電流の分類集計 */
+  let sumIM = 0, sumIH = 0, hasMotor = false;
+  for (const c of children) {
+    if (c.params.circuitType === '電動機') { sumIM += c.result.dI; hasMotor = true; }
+    else sumIH += c.result.dI;
+  }
+  const totalI = sumIM + sumIH;
+  const sizingI = hasMotor
+    ? (sumIM <= 50 ? sumIM * 1.25 + sumIH : sumIM * 1.1 + sumIH)
+    : totalI;
+
+  const PF = cfg.powerFactor;
+  const { K, baseV } = getVdParams(sys, V);
+  const sinT = Math.sqrt(1 - PF * PF);
+  const allowVdP = getAllowVdP(cfg.cableLength, sup);
+  const tF = getTempFactor(cfg.wiringMethod, cfg.ambientTemp);
+
+  /* 9-4: MCCB */
+  const mccbTh = hasMotor ? totalI * 1.25 : totalI;
+  const mccbAT = cfg.mccbATOverride !== '自動'
+    ? Number(cfg.mccbATOverride)
+    : (() => { for (const at of MCCB_AT) { if (at >= mccbTh) return at; } return MCCB_AT[MCCB_AT.length - 1]; })();
+
+  const sizes = getCableSizes(cfg.cableType);
+
+  /* ケーブルサイズ走査 */
+  for (const sz of sizes) {
+    const bA = getBaseAmpacity(cfg.cableType, cfg.wiringMethod, sz);
+    if (bA === null) continue;
+    const eA = bA * tF * cfg.reductionFactor;
+    if (eA < sizingI) continue;
+
+    const imp = getImpedance(cfg.cableType, freq, sz);
+    if (!imp) continue;
+    const Z = imp[0] * PF + imp[1] * sinT;
+    const vd = K * totalI * (cfg.cableLength / 1000) * Z;
+    const vdP = baseV > 0 ? vd / baseV * 100 : 0;
+    if (vdP > allowVdP) continue;
+
+    /* 9-5: 保護協調 */
+    const protOK = hasMotor ? eA >= mccbAT / 2.5 : eA >= mccbAT;
+    if (!protOK) continue;
+
+    return {
+      ok: true, size: sz, totalI: rd(totalI), sumIM: rd(sumIM), sumIH: rd(sumIH),
+      hasMotor, sizingI: rd(sizingI), mccbAT,
+      baseAmpacity: bA, tempFactor: rd(tF, 3), reductionFactor: cfg.reductionFactor,
+      effectiveAmpacity: rd(eA), Z: rd(Z, 4), K,
+      vd: rd(vd), vdPercent: rd(vdP),
+      allowVd: rd(baseV * allowVdP / 100), allowVdPercent: allowVdP,
+      ampacityOK: true, vdOK: true, protOK: true
+    };
+  }
+
+  /* 全サイズ不適合 */
+  const sz = sizes[sizes.length - 1];
+  const bA = getBaseAmpacity(cfg.cableType, cfg.wiringMethod, sz);
+  const eA = bA !== null ? bA * tF * cfg.reductionFactor : 0;
+  const imp = getImpedance(cfg.cableType, freq, sz);
+  const Z = imp ? imp[0] * PF + imp[1] * sinT : 0;
+  const vd = K * totalI * (cfg.cableLength / 1000) * Z;
+  const vdP = baseV > 0 ? vd / baseV * 100 : 0;
+
+  return {
+    ok: false, size: sz, totalI: rd(totalI), sumIM: rd(sumIM), sumIH: rd(sumIH),
+    hasMotor, sizingI: rd(sizingI), mccbAT,
+    baseAmpacity: bA || 0, tempFactor: rd(tF, 3), reductionFactor: cfg.reductionFactor,
+    effectiveAmpacity: rd(eA), Z: rd(Z, 4), K,
+    vd: rd(vd), vdPercent: rd(vdP),
+    allowVd: rd(baseV * allowVdP / 100), allowVdPercent: allowVdP,
+    ampacityOK: eA >= sizingI, vdOK: vdP <= allowVdP,
+    protOK: hasMotor ? eA >= mccbAT / 2.5 : eA >= mccbAT
+  };
+}
 
 /* === COMPONENTS === */
 /* TODO: P3 で実装 — Slider, Sec, RC, Badge 等 */
@@ -42,6 +304,35 @@ body {
 
 /* === APP === */
 function App() {
+  /* P2 検証用: デフォルト条件で計算エンジンをテスト */
+  const testResult = React.useMemo(() => {
+    const testCases = [
+      { label: '一般 15kW 三相200V CVT ラック 30m',
+        params: { system: '三相3線式', voltage: 200, freq: '60Hz', supplyType: '低圧受電',
+          circuitType: '一般', capacity: 15, unit: 'kW', powerFactor: 0.85,
+          efficiency: 1.0, demandFactor: 100, cableLength: 30, cableType: 'CVT',
+          wiringMethod: 'ケーブルラック配線', ambientTemp: 40, reductionFactor: 0.70,
+          mccbATOverride: '自動' }},
+      { label: '電動機 7.5kW 三相200V CVT ラック 50m',
+        params: { system: '三相3線式', voltage: 200, freq: '60Hz', supplyType: '低圧受電',
+          circuitType: '電動機', capacity: 7.5, unit: 'kW', powerFactor: 0.85,
+          efficiency: 0.9, demandFactor: 100, cableLength: 50, cableType: 'CVT',
+          wiringMethod: 'ケーブルラック配線', ambientTemp: 40, reductionFactor: 0.70,
+          mccbATOverride: '自動' }},
+      { label: '一般 3kW 単相200V CV-2C 配管 20m',
+        params: { system: '単相2線式', voltage: 200, freq: '60Hz', supplyType: '低圧受電',
+          circuitType: '一般', capacity: 3, unit: 'kW', powerFactor: 0.85,
+          efficiency: 1.0, demandFactor: 100, cableLength: 20, cableType: 'CV-2C',
+          wiringMethod: '配管配線', ambientTemp: 40, reductionFactor: 0.70,
+          mccbATOverride: '自動' }}
+    ];
+    return testCases.map(tc => ({ label: tc.label, result: runCalc(tc.params) }));
+  }, []);
+
+  const s = { fontSize: 12, fontFamily: 'monospace', margin: '4px 0' };
+  const badge = ok => ({ display: 'inline-block', padding: '1px 6px', borderRadius: 3,
+    fontSize: 11, fontWeight: 700, color: '#fff', background: ok ? '#4caf50' : '#f44336' });
+
   return (
     <div style={{ height: '100vh', display: 'flex', flexDirection: 'column' }}>
       {/* ヘッダー */}
@@ -68,9 +359,27 @@ function App() {
           <p style={{ color: '#999' }}>入力フォーム（P3 で実装）</p>
         </div>
 
-        {/* 右ペイン: 結果 + 一覧 */}
+        {/* 右ペイン: 計算エンジン検証 */}
         <div style={{ flex: 1, overflowY: 'auto', padding: 16 }}>
-          <p style={{ color: '#999' }}>選定結果 / 登録一覧（P3, P4 で実装）</p>
+          <h3 style={{ marginBottom: 12 }}>計算エンジン検証 (P2)</h3>
+          {testResult.map((tc, i) => {
+            const r = tc.result;
+            return (
+              <div key={i} style={{ background: '#fff', border: '1px solid #ddd', borderRadius: 6, padding: 12, marginBottom: 12 }}>
+                <div style={{ fontWeight: 700, marginBottom: 8 }}>{tc.label}</div>
+                <div style={{ display: 'flex', gap: 16, marginBottom: 8 }}>
+                  <span style={badge(r.ok)}>{r.ok ? 'OK' : 'NG'}</span>
+                  <span style={badge(r.ampacityOK)}>許容電流 {r.ampacityOK ? '○' : '×'}</span>
+                  <span style={badge(r.vdOK)}>電圧降下 {r.vdOK ? '○' : '×'}</span>
+                  <span style={badge(r.protOK)}>保護協調 {r.protOK ? '○' : '×'}</span>
+                </div>
+                <p style={s}>設計電流: {r.dI} A → サイジング電流: {r.sizingI} A</p>
+                <p style={s}>選定ケーブル: {r.size} mm² / MCCB: {r.mccbAT} AT</p>
+                <p style={s}>許容電流: {r.baseAmpacity} A × {r.tempFactor} × {r.reductionFactor} = {r.effectiveAmpacity} A</p>
+                <p style={s}>電圧降下: Z={r.Z} Ω/km, K={rd(r.K, 3)}, e={r.vd} V ({r.vdPercent}%) / 許容 {r.allowVd} V ({r.allowVdPercent}%)</p>
+              </div>
+            );
+          })}
         </div>
       </div>
     </div>
