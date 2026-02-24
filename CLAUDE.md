@@ -1,102 +1,104 @@
-# DDD Scaffold Templates
+# 低圧幹線ケーブル計算ツール — 開発ガイドライン
 
 ## プロジェクト概要
 
-DDD（ドメイン駆動設計）+ レイヤードアーキテクチャのプロジェクトを新規構築するためのスキャフォールディングテンプレート集。技術スタック（言語・フレームワーク）に依存しない汎用的な設計パターンを提供する。
+低圧幹線のケーブルサイズ選定を自動化する Web アプリケーション。許容電流・電圧降下・保護協調の 3 条件を同時に満たす最小ケーブルサイズと MCCB 定格を即座に決定する。
 
-## 使い方
+- **単一 HTML ファイル構成**: `index.html` に全コードを含む。ビルドツール不要
+- **クライアントサイド完結**: サーバー処理なし。オフラインで動作する
+- **GitHub Pages で公開**: GitHub Actions により main ブランチへの push で自動デプロイ
 
-```
-/project:init-scaffold
-```
-
-Claude Code が対話的にヒアリングし、フォルダ構造・設定ファイル・CLAUDE.md・ガードレール一式を生成する。
-
-## リポジトリ構成
-
-- `.claude/commands/init-scaffold.md` — メインの slash command
-- `scaffold-templates/` — テンプレートファイル群（19 ファイル）
+## アーキテクチャ
 
 ```
-scaffold-templates/
-├── README.md               # テンプレート全体の説明
-├── root/                   # プロジェクトルートのテンプレート
-│   ├── claude-md.md
-│   ├── gitignore.md
-│   └── readme.md
-├── layers/                 # レイヤー別 CLAUDE.md テンプレート
-│   ├── domain/claude-md.md
-│   ├── api/claude-md.md
-│   ├── web/claude-md.md
-│   └── mobile/claude-md.md
-├── commands/               # slash command テンプレート
-│   ├── add-domain-entity.md
-│   ├── add-usecase.md
-│   ├── add-api-endpoint.md
-│   ├── add-web-feature.md
-│   ├── add-mobile-feature.md
-│   └── review.md
-├── docs/                   # ドキュメントテンプレート
-│   ├── constraints-readme.md
-│   ├── issues-readme.md
-│   └── adr-template.md
-└── guardrails/             # ガードレール設計テンプレート
-    ├── dependency-rules.md
-    └── git-hooks.md
+index.html
+├── <style>         — CSS（インラインスタイル中心、グローバルリセットのみ <style>）
+├── <div id="root"> — React マウントポイント
+├── CDN <script>    — React 18 / ReactDOM / Babel Standalone
+└── <script type="text/babel">
+    ├── DATA TABLES     — インピーダンス値・許容電流値の定数テーブル
+    ├── CALC ENGINE     — 計算ロジック（runCalc, runParentCalc）
+    ├── COMPONENTS      — UI コンポーネント（Slider, Sec, RC, Badge 等）
+    ├── PDF GENERATION  — 計算書 HTML 生成（genPDF）
+    └── APP             — メインコンポーネント（App）
 ```
 
-## テンプレート記法
+## 開発の判断基準（優先順）
 
-### プレースホルダー
+### 1. 計算の正確さが最優先
 
-`{{VARIABLE}}` — Claude がヒアリング結果で置換する変数。主要な変数:
+- インピーダンス値・許容電流値は技資第 103 号 A / JCS 0168 の公式データをそのまま使う。丸め・近似は行わない
+- 電動機回路の 1.25 倍 / 1.1 倍ルール、保護協調の AT/2.5 ルールなど、規格上の分岐条件は省略しない
+- 精密式（R·cosθ + X·sinθ）を常に使い、簡略式へのフォールバックは設けない
 
-- `{{PROJECT_NAME}}` — プロジェクト名
-- `{{PROJECT_DESCRIPTION}}` — プロジェクト概要
-- `{{SCOPE_NAME}}` — パッケージスコープ名
-- `{{LANGUAGE}}` — 主要言語
-- `{{API_FRAMEWORK}}` — API フレームワーク
-- `{{DOMAIN_DIR}}`, `{{API_DIR}}`, `{{WEB_DIR}}`, `{{MOBILE_DIR}}` — 各レイヤーのディレクトリパス
+### 2. 入力から結果までの距離を最短にする
 
-全変数一覧は `scaffold-templates/README.md` を参照。
+- 選択肢の変更は即時反映（onChange）、数値入力はフォーカスアウトで確定（onBlur）
+- 連動制御（電気方式→電圧選択肢、回路種別→効率欄の表示切替など）で不整合な入力状態を作らせない
+- 初期値はもっとも一般的な条件（三相 3 線式 200V 60Hz、CVT、ケーブルラック、40℃、低減率 0.70）
 
-### 条件ブロック
+### 3. ブラウザだけで完結する
 
-`<!-- IF: CONDITION -->` 〜 `<!-- ENDIF -->` — 条件付きで含める/除外するセクション。
+- サーバーサイドの計算処理やデータベースは使わない
+- データの永続化は JSON export/import で対応する。localStorage には依存しない
+- オフライン環境（現場事務所等）でも使えること
 
-- `HAS_API_LAYER`, `HAS_WEB_LAYER`, `HAS_MOBILE_LAYER` — レイヤーの有無
-- `IS_TYPESCRIPT`, `IS_PYTHON`, `IS_GO` — 言語判定
-- `HAS_MONOREPO`, `HAS_DEP_CHECK`, `HAS_FORMATTER` — ツールの有無
+### 4. 計算書として提出できる品質
 
-## 対応言語・フレームワーク
+- PDF 出力は公共建築工事標準仕様書の様式（電-8-1）に準拠
+- 計算過程（K 値、Z 値、許容値）が追跡可能な状態で出力
 
-| カテゴリ | 選択肢 |
-|---------|-------|
-| 言語 | TypeScript / Python / Go |
-| モノレポ | Turborepo / Nx / none |
-| API | Azure Functions / Express / Hono / FastAPI / Gin / none |
-| Web UI | React+Vite / Next.js / Vue / none |
-| Mobile | React Native / Flutter / none |
-| テスト | Vitest / Jest / pytest / go test |
-| リンター | ESLint / Biome / Ruff / golangci-lint |
-| フォーマッター | Prettier / Biome / Black / gofmt / none |
-| 依存チェック | dependency-cruiser / import-linter / none |
+## データテーブル
 
-## 生成されるガードレール（8 種）
+計算に使用する定数テーブルはすべて `index.html` 内にハードコードされている。
 
-1. **slash command によるコンテキスト構造化** — `.claude/commands/` に定型操作コマンドを配置
-2. **依存方向の制御** — レイヤー間の依存方向を機械的にチェック
-3. **レイヤーごとのテスト原則** — Domain 90%+, Application 全フロー, UI 軽量
-4. **Git フックによる品質チェック** — pre-commit: lint, pre-push: 全体チェック
-5. **レビューコマンド** — `/project:review` でガイドライン違反を検出
-6. **制約条件の記録** — `docs/constraints/` に設計判断を蓄積
-7. **事象管理** — `docs/issues/` にブロッカーを記録・追跡
-8. **クロスプラットフォーム開発環境の保護** — lockfile 汚染防止ルール
+| テーブル | 内容 | 出典 |
+|---------|------|------|
+| `IMP_CV`, `IMP_CVT` | インピーダンス [Ω/km]（50Hz / 60Hz） | 技資第 103 号 A |
+| `A_RACK`, `A_COND`, `A_DIRECT`, `A_DUCT` | 許容電流 [A]（4 敷設方式 × 4 ケーブル種類） | 内線規程 |
+| `TC_AIR`, `TC_GND` | 温度補正係数（気中 / 地中） | 内線規程 |
+| `MCCB_AT` | MCCB 定格電流の選択肢 [A] | JIS C 8201-2-1 |
+| `RED_PRE` | 多条低減率プリセット | 内線規程 |
 
-## テンプレートの編集
+## 計算ロジック
 
-テンプレートを編集する際は以下に注意:
+### 子回路（runCalc）
 
-1. プレースホルダー `{{VAR}}` の命名は `scaffold-templates/README.md` の一覧に合わせる
-2. 条件ブロック `<!-- IF: CONDITION -->` は対応する `<!-- ENDIF -->` を必ず閉じる
-3. テンプレート内の markdown コードブロック（` ``` `）が実際に生成されるファイルの内容
+1. 設計電流 `dI` を算出（kW → A 変換、需要率適用）
+2. ケーブル電流 `cI` を決定（電動機: ×1.25 / ×1.1、一般: そのまま）
+3. ケーブルサイズを小さい方から走査:
+   - 許容電流（温度補正・低減率適用後）≧ `cI`
+   - 電圧降下 ≦ 許容値
+   - 上記を両方満たす最小サイズを選定
+4. MCCB 定格を選定（自動 or 手動オーバーライド）
+5. 保護協調チェック（一般: `eA ≧ AT`、電動機: `eA ≧ AT/2.5`）
+6. 保護協調 NG の場合、ケーブルサイズを 1 段上げて再チェック
+
+### 親幹線（runParentCalc）
+
+1. 子回路の設計電流を電動機 / 一般で分けて合算
+2. 親幹線のケーブル電流を決定（電動機含む場合: 電動機分 ×1.25 + 一般分）
+3. 以降は子回路と同じ走査ロジック
+
+## 技術スタック
+
+| 項目 | 詳細 |
+|------|------|
+| React | 18.2.0（CDN: cdnjs.cloudflare.com） |
+| Babel Standalone | 7.23.9（JSX → JS 変換、CDN） |
+| フォント | Noto Sans JP / Hiragino Kaku Gothic ProN / Meiryo |
+| 印刷用フォント | MS Gothic / Hiragino Kaku Gothic ProN |
+
+## コーディング規約
+
+- **単一ファイル**: すべてのコードは `index.html` 内に記述する。ファイル分割しない
+- **変数名**: 計算ロジックでは電気工学の慣例に従う短縮名を許容（`dI`, `eA`, `vdP`, `PF` 等）
+- **テーブルデータ**: 圧縮記法で記述（可読性より正確さとコンパクトさ）
+- **コメント**: セクション区切りに `/* === SECTION NAME === */` 形式を使用
+- **新しいライブラリの追加**: CDN 経由のみ。npm / ビルドツールは使用しない
+
+## デプロイ
+
+- main ブランチへの push で GitHub Actions が自動実行
+- `.github/workflows/deploy.yml` により GitHub Pages にデプロイ
+- デプロイ対象は `index.html` のみ（静的ファイル配信）
