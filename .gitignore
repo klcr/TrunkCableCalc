@@ -4,3 +4,6 @@ Thumbs.db
 *.swo
 .vscode/
 .idea/
+
+# ビルド成果物（node scripts/build.js で生成）
+/index.html

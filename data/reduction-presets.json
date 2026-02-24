@@ -1,0 +1,13 @@
+{
+  "source": "内線規程 JEAC 8001",
+  "note": "多条布設時の電流低減率プリセット。カスタム選択時はユーザーが任意の値を入力可能。",
+  "data": [
+    { "label": "補正なし",             "factor": 1.00 },
+    { "label": "1段 S=d 2列",          "factor": 0.85 },
+    { "label": "1段 S=d 3列",          "factor": 0.80 },
+    { "label": "1段 S=d 7列以上",      "factor": 0.70 },
+    { "label": "2段 S=d 2列",          "factor": 0.70 },
+    { "label": "2段 S=d 3列",          "factor": 0.60 },
+    { "label": "カスタム",             "factor": null }
+  ]
+}
