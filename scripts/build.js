@@ -8,7 +8,7 @@
  * ビルドフロー:
  *   1. data/*.json を読み込み、各ファイルの "data" フィールドを抽出
  *   2. JS 定数宣言（const XXX = ...;）を生成
- *   3. src/index.html 内の /* __DATA__ */ マーカーを置換
+ *   3. src/index.html 内の __DATA__ マーカーを置換
  *   4. ルートに index.html を出力
  */
 
