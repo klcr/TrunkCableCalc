@@ -31,6 +31,90 @@ body {
 /* === DATA TABLES === */
 /* __DATA__ */
 
+/* === TREE UTILITIES === */
+
+function genId() {
+  return typeof crypto !== 'undefined' && crypto.randomUUID
+    ? crypto.randomUUID()
+    : Date.now().toString(36) + Math.random().toString(36).slice(2, 8);
+}
+
+function getChildren(nodes, parentId) {
+  return nodes.filter(n => n.parentId === parentId).sort((a, b) => a.order - b.order);
+}
+
+function getParent(nodes, id) {
+  const node = nodes.find(n => n.id === id);
+  return node && node.parentId ? nodes.find(n => n.id === node.parentId) : null;
+}
+
+function getAncestors(nodes, id) {
+  const result = [];
+  let cur = nodes.find(n => n.id === id);
+  while (cur && cur.parentId) {
+    cur = nodes.find(n => n.id === cur.parentId);
+    if (cur) result.push(cur);
+  }
+  return result;
+}
+
+function getDepth(nodes, id) {
+  let d = 0, cur = nodes.find(n => n.id === id);
+  while (cur && cur.parentId) {
+    cur = nodes.find(n => n.id === cur.parentId);
+    d++;
+  }
+  return d;
+}
+
+function getDescendants(nodes, id) {
+  const result = [];
+  const stack = getChildren(nodes, id).slice();
+  while (stack.length) {
+    const n = stack.pop();
+    result.push(n);
+    stack.push(...getChildren(nodes, n.id));
+  }
+  return result;
+}
+
+function buildTree(nodes) {
+  const roots = nodes.filter(n => !n.parentId).sort((a, b) => a.order - b.order);
+  const attach = (node) => ({
+    ...node,
+    children: getChildren(nodes, node.id).map(attach)
+  });
+  return roots.map(attach);
+}
+
+function validateNode(nodes, node) {
+  const depth = node.parentId ? getDepth(nodes, node.parentId) + 1 : 0;
+  if (depth > 3) return 'depth exceeds 3';
+  if (node.type === 'transformer' && depth !== 0) return 'transformer must be root';
+  if (node.type === 'trunk' && depth < 1 && nodes.some(n => n.type === 'transformer')) return 'trunk must be under transformer';
+  if (node.type === 'load') {
+    const parent = node.parentId ? nodes.find(n => n.id === node.parentId) : null;
+    if (!parent || parent.type !== 'trunk') return 'load must be under trunk';
+  }
+  return null;
+}
+
+function addNode(nodes, node) {
+  const err = validateNode(nodes, node);
+  if (err) { console.warn('addNode:', err); return nodes; }
+  return [...nodes, node];
+}
+
+function updateNode(nodes, id, patch) {
+  return nodes.map(n => n.id === id ? { ...n, ...patch, id: n.id, type: n.type, ts: new Date().toISOString() } : n);
+}
+
+function removeNode(nodes, id) {
+  const descIds = new Set(getDescendants(nodes, id).map(n => n.id));
+  descIds.add(id);
+  return nodes.filter(n => !descIds.has(n.id));
+}
+
 /* === CALC ENGINE === */
 
 /* --- 定数・ヘルパー --- */
@@ -296,6 +380,225 @@ function runParentCalc(children, cfg) {
   };
 }
 
+/**
+ * calcTransformer — 変圧器ノードの計算 (§19-3)
+ */
+function calcTransformer(tr) {
+  const S = tr.capacity_kVA * 1000;
+  const Vs = tr.secondaryV;
+  let Rs, Xs;
+  if (tr.xrRatio != null && tr.xrRatio > 0) {
+    const pctR = tr.pctZ / Math.sqrt(1 + tr.xrRatio * tr.xrRatio);
+    const pctX = pctR * tr.xrRatio;
+    Rs = (pctR / 100) * Vs * Vs / S;
+    Xs = (pctX / 100) * Vs * Vs / S;
+  } else {
+    Rs = (tr.pctZ / 100) * Vs * Vs / S;
+    Xs = 0;
+  }
+  const Zs = Math.sqrt(Rs * Rs + Xs * Xs);
+  const In = isThreePhase('三相3線式') ? S / (Math.sqrt(3) * Vs) : S / Vs;
+  const Isc3 = Vs / (Math.sqrt(3) * Zs);
+  return { Rs, Xs, Zs, In, Isc3, pctZ: tr.pctZ, capacity_kVA: tr.capacity_kVA };
+}
+
+/**
+ * aggregateCurrents — ボトムアップ電流合算 (§9-3)
+ */
+function aggregateCurrents(nodes, trunkId, allResults) {
+  const children = getChildren(nodes, trunkId);
+  let sumIM = 0, sumIH = 0;
+  for (const child of children) {
+    if (child.type === 'trunk') {
+      const sub = aggregateCurrents(nodes, child.id, allResults);
+      sumIM += sub.sumIM;
+      sumIH += sub.sumIH;
+    } else if (child.type === 'load') {
+      const r = allResults[child.id];
+      if (!r) continue;
+      if (child.load.circuitType === '電動機') sumIM += r.dI;
+      else sumIH += r.dI;
+    }
+  }
+  return { sumIM, sumIH, totalI: sumIM + sumIH, hasMotor: sumIM > 0 };
+}
+
+/**
+ * runTrunkCalc — 幹線ノードのケーブルサイズ選定
+ */
+function runTrunkCalc(trunk, agg) {
+  const { sumIM, sumIH, totalI, hasMotor } = agg;
+  if (totalI === 0) return null;
+
+  const sys = trunk.system, V = trunk.voltage, freq = trunk.freq, sup = trunk.supplyType;
+  const PF = trunk.powerFactor;
+  const sizingI = hasMotor
+    ? (sumIM <= 50 ? sumIM * 1.25 + sumIH : sumIM * 1.1 + sumIH)
+    : totalI;
+
+  const { K, baseV } = getVdParams(sys, V);
+  const sinT = Math.sqrt(1 - PF * PF);
+  const allowVdP = getAllowVdP(trunk.cableLength, sup);
+  const tF = getTempFactor(trunk.wiringMethod, trunk.ambientTemp);
+
+  const mccbTh = hasMotor ? totalI * 1.25 : totalI;
+  const mccbAT = trunk.mccbATOverride !== '自動'
+    ? Number(trunk.mccbATOverride)
+    : (() => { for (const at of MCCB_AT) { if (at >= mccbTh) return at; } return MCCB_AT[MCCB_AT.length - 1]; })();
+
+  const sizes = getCableSizes(trunk.cableType);
+
+  for (const sz of sizes) {
+    const bA = getBaseAmpacity(trunk.cableType, trunk.wiringMethod, sz);
+    if (bA === null) continue;
+    const eA = bA * tF * trunk.reductionFactor;
+    if (eA < sizingI) continue;
+
+    const imp = getImpedance(trunk.cableType, freq, sz);
+    if (!imp) continue;
+    const Z = imp[0] * PF + imp[1] * sinT;
+    const vd = K * totalI * (trunk.cableLength / 1000) * Z;
+    const vdP = baseV > 0 ? vd / baseV * 100 : 0;
+    if (vdP > allowVdP) continue;
+
+    const protOK = hasMotor ? eA >= mccbAT / 2.5 : eA >= mccbAT;
+    if (!protOK) continue;
+
+    return {
+      ok: true, size: sz, dI: rd(totalI), totalI: rd(totalI),
+      sumIM: rd(sumIM), sumIH: rd(sumIH), hasMotor, sizingI: rd(sizingI), mccbAT,
+      baseAmpacity: bA, tempFactor: rd(tF, 3), reductionFactor: trunk.reductionFactor,
+      effectiveAmpacity: rd(eA), Z: rd(Z, 4), K,
+      vd: rd(vd), vdPercent: rd(vdP),
+      allowVd: rd(baseV * allowVdP / 100), allowVdPercent: allowVdP,
+      ampacityOK: true, vdOK: true, protOK: true, baseV
+    };
+  }
+
+  const sz = sizes[sizes.length - 1];
+  const bA = getBaseAmpacity(trunk.cableType, trunk.wiringMethod, sz);
+  const eA = bA !== null ? bA * tF * trunk.reductionFactor : 0;
+  const imp = getImpedance(trunk.cableType, freq, sz);
+  const Z = imp ? imp[0] * PF + imp[1] * sinT : 0;
+  const vd = K * totalI * (trunk.cableLength / 1000) * Z;
+  const vdP = baseV > 0 ? vd / baseV * 100 : 0;
+
+  return {
+    ok: false, size: sz, dI: rd(totalI), totalI: rd(totalI),
+    sumIM: rd(sumIM), sumIH: rd(sumIH), hasMotor, sizingI: rd(sizingI), mccbAT,
+    baseAmpacity: bA || 0, tempFactor: rd(tF, 3), reductionFactor: trunk.reductionFactor,
+    effectiveAmpacity: rd(eA), Z: rd(Z, 4), K,
+    vd: rd(vd), vdPercent: rd(vdP),
+    allowVd: rd(baseV * allowVdP / 100), allowVdPercent: allowVdP,
+    ampacityOK: eA >= sizingI, vdOK: vdP <= allowVdP,
+    protOK: hasMotor ? eA >= mccbAT / 2.5 : eA >= mccbAT, baseV
+  };
+}
+
+/**
+ * calcCumulativeVd — トップダウン累積電圧降下 (§20-3)
+ */
+function calcCumulativeVd(nodes, nodeId, parentCumVd, allResults) {
+  const r = allResults[nodeId];
+  const cumVd = parentCumVd + (r && r.vd ? r.vd : 0);
+  if (r) {
+    r.cumulativeVd = rd(cumVd);
+    const bV = r.baseV || (r.allowVdPercent && r.allowVd ? r.allowVd / r.allowVdPercent * 100 : 0);
+    r.cumulativeVdP = bV > 0 ? rd(cumVd / bV * 100) : 0;
+  }
+  for (const child of getChildren(nodes, nodeId)) {
+    calcCumulativeVd(nodes, child.id, cumVd, allResults);
+  }
+}
+
+/**
+ * calcFaultCurrents — トップダウン R+jX ベクトル累積による短絡電流計算 (§20-2, §20-3)
+ */
+function calcFaultCurrents(nodes, allResults) {
+  const tr = nodes.find(n => n.type === 'transformer');
+  if (!tr) return;
+  const trR = allResults[tr.id];
+  if (!trR) return;
+  // M2-3: HV integration point — hvSystem impedance would be added here
+  propagateFault(nodes, tr.id, trR.Rs, trR.Xs, tr.transformer.secondaryV, allResults);
+}
+
+function propagateFault(nodes, nodeId, Rcum, Xcum, Vs, allResults) {
+  const r = allResults[nodeId];
+  if (r) {
+    r.Rcum = Rcum;
+    r.Xcum = Xcum;
+    r.Zcum = Math.sqrt(Rcum * Rcum + Xcum * Xcum);
+    r.Isc3 = Vs / (Math.sqrt(3) * r.Zcum);
+  }
+  for (const child of getChildren(nodes, nodeId)) {
+    let Rc = 0, Xc = 0;
+    if (child.type === 'trunk' || child.type === 'load') {
+      const cfg = child.type === 'trunk' ? child.trunk : child.load;
+      const childR = allResults[child.id];
+      if (childR && childR.size) {
+        const imp = getImpedance(cfg.cableType, cfg.freq, childR.size);
+        if (imp) {
+          const Lkm = cfg.cableLength / 1000;
+          Rc = imp[0] * Lkm;
+          Xc = imp[1] * Lkm;
+        }
+      }
+    }
+    propagateFault(nodes, child.id, Rcum + Rc, Xcum + Xc, Vs, allResults);
+  }
+}
+
+/**
+ * checkWithstand — 短時間耐電流検証 (§20-6)
+ */
+function checkWithstand(size_mm2, Isc3, t) {
+  t = t || 0.1;
+  const K = 134; /* Cu_XLPE: WITHSTAND.K_constants.Cu_XLPE.K */
+  const Iw = K * size_mm2 / Math.sqrt(t);
+  return { ok: Isc3 <= Iw, Iwithstand: rd(Iw), Isc3: rd(Isc3), K, t };
+}
+
+/**
+ * calculateAll — 全ノード一括計算
+ */
+function calculateAll(nodes) {
+  const results = {};
+
+  /* 1. ボトムアップ: 全 load ノードを計算 */
+  for (const n of nodes) {
+    if (n.type === 'load') results[n.id] = runCalc(n.load);
+  }
+
+  /* 2. ボトムアップ: trunk ノードを深い順に計算 */
+  const trunks = nodes.filter(n => n.type === 'trunk')
+    .map(n => ({ node: n, depth: getDepth(nodes, n.id) }))
+    .sort((a, b) => b.depth - a.depth);
+  for (const { node } of trunks) {
+    const agg = aggregateCurrents(nodes, node.id, results);
+    const r = runTrunkCalc(node.trunk, agg);
+    if (r) results[node.id] = r;
+  }
+
+  /* 3. transformer ノード */
+  for (const n of nodes) {
+    if (n.type === 'transformer') results[n.id] = calcTransformer(n.transformer);
+  }
+
+  /* 4. トップダウン: 累積電圧降下 */
+  const roots = nodes.filter(n => !n.parentId);
+  for (const root of roots) {
+    calcCumulativeVd(nodes, root.id, 0, results);
+  }
+
+  /* 5. トップダウン: 短絡電流 */
+  calcFaultCurrents(nodes, results);
+
+  // M2-3: Ground fault current Ig = 3ωCV — reserved for future
+
+  return results;
+}
+
 /* === COMPONENTS === */
 
 /* --- 電気方式 → 電圧選択肢 (§5) --- */
@@ -335,6 +638,22 @@ const DEFAULT_PARAMS = {
   demandFactor: 100, cableLength: 30,
   cableType: 'CVT', wiringMethod: 'ケーブルラック配線',
   ambientTemp: 40, reductionPreset: '1段 S=d 7列以上', reductionFactor: 0.70
+};
+
+/* --- 変圧器デフォルト (§19) --- */
+const DEFAULT_TR_PARAMS = {
+  name: 'TR-1', trType: '三相油入', capacity_kVA: 500,
+  primaryV: 6600, secondaryV: 210,
+  pctZ: 4.00, xrRatio: 2.98, connection: 'Δ-Y', pctZAuto: true,
+  hvSystem: null /* P4-7: reserved for M2-3 */
+};
+
+/* --- 幹線デフォルト (§9) --- */
+const DEFAULT_TRUNK_PARAMS = {
+  name: '', system: '三相3線式', voltage: 210, freq: '60Hz', supplyType: '高圧受電',
+  cableLength: 10, cableType: 'CVT', wiringMethod: 'ケーブルラック配線',
+  ambientTemp: 40, reductionPreset: '1段 S=d 7列以上', reductionFactor: 0.70,
+  powerFactor: 0.85, mccbATOverride: '自動'
 };
 
 /* --- Badge コンポーネント (§11-1) --- */
@@ -479,7 +798,8 @@ function SliderInput({ value, displayValue, onChange, onConfirm, cfg, min, max, 
 function ResultPanel({ result, params }) {
   if (!result) return <div style={{ color: '#999', padding: 16 }}>入力を完了すると結果が表示されます</div>;
   const r = result;
-  const isMotor = params.circuitType === '電動機';
+  const isTrunk = r.hasMotor !== undefined;
+  const isMotor = isTrunk ? r.hasMotor : params.circuitType === '電動機';
 
   const cardStyle = {
     background: '#fff', border: '1px solid #e0e0e0', borderRadius: 8,
@@ -523,7 +843,12 @@ function ResultPanel({ result, params }) {
             <div style={ddStyle}>{r.dI} A</div>
           </div>
         </div>
-        {isMotor && (
+        {isTrunk && r.hasMotor && (
+          <div style={{ fontSize: 12, color: '#666', background: '#f5f5f5', borderRadius: 4, padding: '4px 8px', marginTop: 4 }}>
+            電動機 {r.sumIM}A × {r.sumIM <= 50 ? '1.25' : '1.1'} + 一般 {r.sumIH}A = {r.sizingI}A
+          </div>
+        )}
+        {!isTrunk && isMotor && (
           <div style={{ fontSize: 12, color: '#666', background: '#f5f5f5', borderRadius: 4, padding: '4px 8px', marginTop: 4 }}>
             サイジング電流: {r.sizingI} A（{r.dI <= 50 ? '×1.25' : '×1.1'} 補正）
           </div>
@@ -571,6 +896,388 @@ function ResultPanel({ result, params }) {
           </span>
         </div>
       </div>
+
+      {/* 短絡電流（変圧器接続時） */}
+      {r.Isc3 != null && (
+        <div style={cardStyle}>
+          <div style={{ fontSize: 13, fontWeight: 700, marginBottom: 8, color: '#1976d2' }}>短絡電流</div>
+          <div style={detailRow}><span>短絡電流 Isc₃</span><span>{rd(r.Isc3 / 1000, 1)} kA</span></div>
+          <div style={detailRow}><span>累積 R</span><span>{rd(r.Rcum * 1000, 2)} mΩ</span></div>
+          <div style={detailRow}><span>累積 X</span><span>{rd(r.Xcum * 1000, 2)} mΩ</span></div>
+          {r.size && (() => {
+            const wt = checkWithstand(r.size, r.Isc3, 0.1);
+            return (
+              <React.Fragment>
+                <div style={detailRow}><span>短時間耐電流 (K=134, t=0.1s)</span><span>{rd(wt.Iwithstand / 1000, 1)} kA</span></div>
+                <div style={{ ...detailRow, fontWeight: 700, borderBottom: 'none' }}>
+                  <span>熱耐量</span>
+                  <span><Badge ok={wt.ok} label={wt.ok ? 'OK' : 'NG'} /></span>
+                </div>
+              </React.Fragment>
+            );
+          })()}
+        </div>
+      )}
+
+      {/* 累積電圧降下（ツリー内） */}
+      {r.cumulativeVd != null && r.cumulativeVd > 0 && (
+        <div style={cardStyle}>
+          <div style={{ fontSize: 13, fontWeight: 700, marginBottom: 8, color: '#1976d2' }}>累積電圧降下</div>
+          <div style={{ ...detailRow, fontWeight: 700, borderBottom: 'none' }}>
+            <span>変圧器からの累積</span>
+            <span>{r.cumulativeVd} V ({r.cumulativeVdP}%)</span>
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
+/* --- TransformerResultPanel 変圧器結果パネル (§19-3) --- */
+function TransformerResultPanel({ result, nodes, nodeId, allResults }) {
+  if (!result) return null;
+  const r = result;
+  const cardStyle = { background: '#fff', border: '1px solid #e0e0e0', borderRadius: 8, padding: 16, marginBottom: 16 };
+  const dtStyle = { fontSize: 12, color: '#888', marginBottom: 2 };
+  const ddStyle = { fontSize: 18, fontWeight: 700, marginBottom: 8 };
+  const detailRow = { display: 'flex', justifyContent: 'space-between', fontSize: 13, padding: '3px 0', borderBottom: '1px solid #f0f0f0' };
+
+  let utilization = 0;
+  if (nodeId) {
+    const allLoads = getDescendants(nodes, nodeId).filter(n => n.type === 'load');
+    let totalKW = 0;
+    for (const l of allLoads) {
+      totalKW += (l.load.capacity || 0) * (l.load.demandFactor || 100) / 100;
+    }
+    utilization = r.capacity_kVA > 0 ? totalKW / r.capacity_kVA * 100 : 0;
+  }
+
+  return (
+    <div>
+      <div style={cardStyle}>
+        <div style={{ display: 'flex', gap: 16 }}>
+          <div style={{ flex: 1 }}>
+            <div style={dtStyle}>定格二次電流</div>
+            <div style={ddStyle}>{rd(r.In)} A</div>
+          </div>
+          <div style={{ flex: 1 }}>
+            <div style={dtStyle}>短絡電流 Isc₃</div>
+            <div style={ddStyle}>{rd(r.Isc3 / 1000, 1)} kA</div>
+          </div>
+          <div style={{ flex: 1 }}>
+            <div style={dtStyle}>利用率</div>
+            <div style={ddStyle}>{rd(utilization)}%</div>
+          </div>
+        </div>
+      </div>
+      <div style={cardStyle}>
+        <div style={{ fontSize: 13, fontWeight: 700, marginBottom: 8, color: '#1976d2' }}>ソースインピーダンス</div>
+        <div style={detailRow}><span>Rs</span><span>{rd(r.Rs * 1000, 2)} mΩ</span></div>
+        <div style={detailRow}><span>Xs</span><span>{rd(r.Xs * 1000, 2)} mΩ</span></div>
+        <div style={{ ...detailRow, borderBottom: 'none' }}><span>|Zs|</span><span>{rd(r.Zs * 1000, 2)} mΩ</span></div>
+      </div>
+    </div>
+  );
+}
+
+/* --- TransformerForm 変圧器入力フォーム (§19-1) --- */
+function TransformerForm({ trParams, setTrParams, onSave, onCancel, isEdit }) {
+  const getCapacities = (trType) => {
+    if (trType === '三相油入') return TR_RATINGS.three_phase_oil.capacities_kVA;
+    if (trType === '単相油入') return TR_RATINGS.single_phase_oil.capacities_kVA;
+    if (trType === 'モールド') return TR_RATINGS.mold.capacities_kVA;
+    return TR_RATINGS.three_phase_oil.capacities_kVA;
+  };
+
+  const getAutoValues = (trType, kVA) => {
+    const key = String(kVA);
+    if (trType === '三相油入' && TR_RATINGS.three_phase_oil.data[key]) {
+      const d = TR_RATINGS.three_phase_oil.data[key];
+      return { pctZ: d.pct_z, xrRatio: d.xr_ratio };
+    }
+    if (trType === '単相油入' && TR_RATINGS.single_phase_oil.data[key]) {
+      const d = TR_RATINGS.single_phase_oil.data[key];
+      return { pctZ: d.pct_z, xrRatio: d.xr_ratio };
+    }
+    if (trType === 'モールド' && TR_RATINGS.mold.data[key]) {
+      const d = TR_RATINGS.mold.data[key];
+      return { pctZ: d.pct_z_min, xrRatio: null };
+    }
+    return { pctZ: 4.00, xrRatio: null };
+  };
+
+  const handleTypeChange = (val) => {
+    const caps = getCapacities(val);
+    const kVA = caps.includes(trParams.capacity_kVA) ? trParams.capacity_kVA : caps[0];
+    const auto = getAutoValues(val, kVA);
+    setTrParams(p => ({
+      ...p, trType: val, capacity_kVA: kVA,
+      ...(p.pctZAuto ? { pctZ: auto.pctZ, xrRatio: auto.xrRatio } : {})
+    }));
+  };
+
+  const handleCapacityChange = (val) => {
+    const kVA = Number(val);
+    const auto = getAutoValues(trParams.trType, kVA);
+    setTrParams(p => ({
+      ...p, capacity_kVA: kVA,
+      ...(p.pctZAuto ? { pctZ: auto.pctZ, xrRatio: auto.xrRatio } : {})
+    }));
+  };
+
+  const capacities = getCapacities(trParams.trType);
+
+  return (
+    <div>
+      <Sec title="変圧器情報">
+        <RC label="変圧器名称">
+          <input type="text" value={trParams.name} style={{ ...numStyle, textAlign: 'left' }}
+            onChange={e => setTrParams(p => ({ ...p, name: e.target.value }))} />
+        </RC>
+        <RC label="種別">
+          <select value={trParams.trType} style={selStyle} onChange={e => handleTypeChange(e.target.value)}>
+            <option>三相油入</option><option>単相油入</option><option>モールド</option>
+          </select>
+        </RC>
+        <RC label="容量 [kVA]">
+          <select value={trParams.capacity_kVA} style={selStyle} onChange={e => handleCapacityChange(e.target.value)}>
+            {capacities.map(c => <option key={c} value={c}>{c}</option>)}
+          </select>
+        </RC>
+        <RC label="一次電圧 [V]">
+          <select value={trParams.primaryV} style={selStyle} onChange={e => setTrParams(p => ({ ...p, primaryV: Number(e.target.value) }))}>
+            <option value={3300}>3300</option><option value={6600}>6600</option>
+          </select>
+        </RC>
+        <RC label="二次電圧 [V]">
+          <select value={trParams.secondaryV} style={selStyle} onChange={e => setTrParams(p => ({ ...p, secondaryV: Number(e.target.value) }))}>
+            <option value={105}>105</option><option value={210}>210</option><option value={420}>420</option>
+          </select>
+        </RC>
+        <RC label="%Z">
+          <div style={{ display: 'flex', gap: 6, alignItems: 'center' }}>
+            <input type="number" step="0.01" value={trParams.pctZ} style={{ ...numStyle, flex: 1 }}
+              disabled={trParams.pctZAuto}
+              onChange={e => setTrParams(p => ({ ...p, pctZ: parseFloat(e.target.value) || 0 }))} />
+            <label style={{ fontSize: 12, whiteSpace: 'nowrap' }}>
+              <input type="checkbox" checked={trParams.pctZAuto}
+                onChange={e => {
+                  const auto = e.target.checked;
+                  const vals = getAutoValues(trParams.trType, trParams.capacity_kVA);
+                  setTrParams(p => ({ ...p, pctZAuto: auto, ...(auto ? { pctZ: vals.pctZ, xrRatio: vals.xrRatio } : {}) }));
+                }} /> Auto
+            </label>
+          </div>
+          {trParams.trType === 'モールド' && (
+            <div style={{ fontSize: 11, color: '#888', marginTop: 2 }}>
+              ※ モールド: 短絡電流計算は最小値を使用
+            </div>
+          )}
+        </RC>
+        <RC label="X/R 比">
+          <input type="number" step="0.01" value={trParams.xrRatio != null ? trParams.xrRatio : ''} style={numStyle}
+            disabled={trParams.pctZAuto && trParams.trType !== 'モールド'}
+            onChange={e => setTrParams(p => ({ ...p, xrRatio: e.target.value === '' ? null : parseFloat(e.target.value) }))} />
+        </RC>
+        <RC label="結線方式">
+          <select value={trParams.connection} style={selStyle}
+            onChange={e => setTrParams(p => ({ ...p, connection: e.target.value }))}>
+            {['Δ-Y', 'Y-Y', 'Δ-Δ', 'Y-Δ', 'V-V'].map(c => <option key={c}>{c}</option>)}
+          </select>
+        </RC>
+      </Sec>
+      <div style={{ display: 'flex', gap: 8 }}>
+        <button onClick={onSave} style={{
+          flex: 1, padding: '10px', borderRadius: 6, border: 'none',
+          background: '#1976d2', color: '#fff', fontSize: 14, fontWeight: 700, cursor: 'pointer'
+        }}>{isEdit ? '更新' : '+ 変圧器登録'}</button>
+        {isEdit && (
+          <button onClick={onCancel} style={{
+            padding: '10px 16px', borderRadius: 6, border: '1px solid #ccc',
+            background: '#fff', color: '#666', fontSize: 14, cursor: 'pointer'
+          }}>取消</button>
+        )}
+      </div>
+    </div>
+  );
+}
+
+/* --- TrunkForm 幹線入力フォーム (§9-6) --- */
+function TrunkForm({ trunkParams, setTrunkParams, onSave, onCancel, isEdit, childSummary }) {
+  const isCustomReduction = trunkParams.reductionPreset === 'カスタム';
+  return (
+    <div>
+      <Sec title="幹線情報">
+        <RC label="幹線名称">
+          <input type="text" value={trunkParams.name} style={{ ...numStyle, textAlign: 'left' }}
+            onChange={e => setTrunkParams(p => ({ ...p, name: e.target.value }))} />
+        </RC>
+        <RC label="電気方式">
+          <span style={{ fontSize: 13 }}>{trunkParams.system} {trunkParams.voltage}V</span>
+        </RC>
+      </Sec>
+      <Sec title="ケーブル条件">
+        <RC label="こう長 [m]">
+          <input type="number" step="0.5" value={trunkParams.cableLength} style={numStyle}
+            onChange={e => setTrunkParams(p => ({ ...p, cableLength: parseFloat(e.target.value) || 0 }))} />
+        </RC>
+        <RC label="力率 cosθ">
+          <input type="number" step="0.01" min="0.10" max="1.00" value={trunkParams.powerFactor} style={numStyle}
+            onChange={e => setTrunkParams(p => ({ ...p, powerFactor: parseFloat(e.target.value) || 0.85 }))} />
+        </RC>
+        <RC label="ケーブル種類">
+          <select value={trunkParams.cableType} style={selStyle}
+            onChange={e => setTrunkParams(p => ({ ...p, cableType: e.target.value }))}>
+            {getCableTypeOptions(trunkParams.system).map(c => <option key={c}>{c}</option>)}
+          </select>
+        </RC>
+        <RC label="配線方式">
+          <select value={trunkParams.wiringMethod} style={selStyle}
+            onChange={e => setTrunkParams(p => ({ ...p, wiringMethod: e.target.value }))}>
+            {['ケーブルラック配線', '配管配線', '直埋布設', '管路布設'].map(w => <option key={w}>{w}</option>)}
+          </select>
+        </RC>
+        <RC label="周囲温度 [℃]">
+          <input type="number" step="5" min="20" max="50" value={trunkParams.ambientTemp} style={numStyle}
+            onChange={e => setTrunkParams(p => ({ ...p, ambientTemp: Number(e.target.value) }))} />
+        </RC>
+        <RC label="多条低減プリセット">
+          <select value={trunkParams.reductionPreset} style={selStyle}
+            onChange={e => {
+              const val = e.target.value;
+              const preset = RED_PRE.find(p => p.label === val);
+              setTrunkParams(p => ({ ...p, reductionPreset: val, ...(preset && preset.factor !== null ? { reductionFactor: preset.factor } : {}) }));
+            }}>
+            {RED_PRE.map(p => <option key={p.label} value={p.label}>{p.label}{p.factor !== null ? ` (${p.factor})` : ''}</option>)}
+          </select>
+        </RC>
+        {isCustomReduction && (
+          <RC label="低減率">
+            <input type="number" step="0.01" min="0.10" max="1.00" value={trunkParams.reductionFactor} style={numStyle}
+              onChange={e => setTrunkParams(p => ({ ...p, reductionFactor: parseFloat(e.target.value) || 0.70 }))} />
+          </RC>
+        )}
+        {!isCustomReduction && (
+          <RC label="低減率">
+            <span style={{ fontSize: 13 }}>{trunkParams.reductionFactor}</span>
+          </RC>
+        )}
+        <RC label="MCCB AT">
+          <select value={trunkParams.mccbATOverride} style={selStyle}
+            onChange={e => setTrunkParams(p => ({ ...p, mccbATOverride: e.target.value }))}>
+            <option>自動</option>
+            {MCCB_AT.map(at => <option key={at} value={at}>{at} AT</option>)}
+          </select>
+        </RC>
+      </Sec>
+      {childSummary && (
+        <div style={{ fontSize: 12, color: '#666', background: '#f5f5f5', borderRadius: 4, padding: 8, marginBottom: 12 }}>
+          子回路合計: 電動機 {childSummary.sumIM.toFixed(1)}A + 一般 {childSummary.sumIH.toFixed(1)}A = {childSummary.totalI.toFixed(1)}A
+        </div>
+      )}
+      <div style={{ display: 'flex', gap: 8 }}>
+        <button onClick={onSave} style={{
+          flex: 1, padding: '10px', borderRadius: 6, border: 'none',
+          background: '#1976d2', color: '#fff', fontSize: 14, fontWeight: 700, cursor: 'pointer'
+        }}>{isEdit ? '幹線を更新' : '+ 幹線登録'}</button>
+        {isEdit && (
+          <button onClick={onCancel} style={{
+            padding: '10px 16px', borderRadius: 6, border: '1px solid #ccc',
+            background: '#fff', color: '#666', fontSize: 14, cursor: 'pointer'
+          }}>取消</button>
+        )}
+      </div>
+    </div>
+  );
+}
+
+/* --- TreeTable 登録一覧ツリー表示 (§12) --- */
+function TreeTable({ nodes, allResults, selectedId, onSelect, onDelete }) {
+  if (nodes.length === 0) return (
+    <div style={{ color: '#999', padding: 16, fontSize: 13 }}>
+      変圧器または負荷回路を登録してください
+    </div>
+  );
+
+  const tree = buildTree(nodes);
+
+  const renderNode = (node, depth) => {
+    const r = allResults[node.id];
+    const isSelected = node.id === selectedId;
+    const isTr = node.type === 'transformer';
+    const isTrunk = node.type === 'trunk';
+    const bgColor = isSelected ? '#e3f2fd' : isTr ? '#e8eaf6' : isTrunk ? '#f5f5f5' : '#fff';
+    const tag = isTr ? '[TR]' : isTrunk ? '[主幹]' : '└';
+    const name = isTr ? (node.transformer?.name || 'TR')
+      : isTrunk ? (node.trunk?.name || '幹線')
+      : (node.load?.loadName || '負荷');
+    const sysV = isTr ? `${node.transformer?.secondaryV || ''}V`
+      : isTrunk ? `${node.trunk?.system || ''} ${node.trunk?.voltage || ''}V`
+      : `${node.load?.system || ''} ${node.load?.voltage || ''}V`;
+    const cType = isTrunk ? (node.trunk?.cableType || '') : (node.load?.cableType || '');
+
+    return (
+      <React.Fragment key={node.id}>
+        <tr onClick={() => onSelect(node)}
+          style={{ background: bgColor, cursor: 'pointer', borderBottom: '1px solid #eee' }}>
+          <td style={{ padding: '6px 4px', paddingLeft: 8 + depth * 20, fontSize: 12, whiteSpace: 'nowrap' }}>
+            <span style={{
+              display: 'inline-block', padding: '1px 4px', borderRadius: 3, fontSize: 11,
+              fontWeight: 700, marginRight: 4,
+              background: isTr ? '#3f51b5' : isTrunk ? '#78909c' : 'transparent',
+              color: isTr || isTrunk ? '#fff' : '#999'
+            }}>{tag}</span>
+            {name}
+          </td>
+          <td style={{ padding: '6px 4px', fontSize: 12 }}>{sysV}</td>
+          <td style={{ padding: '6px 4px', fontSize: 12, textAlign: 'right' }}>
+            {r && r.dI != null ? `${r.dI}A` : r && r.In != null ? `${rd(r.In)}A` : '-'}
+          </td>
+          <td style={{ padding: '6px 4px', fontSize: 12 }}>
+            {r && r.size ? `${cType} ${r.size}` : '-'}
+          </td>
+          <td style={{ padding: '6px 4px', fontSize: 12, textAlign: 'right' }}>
+            {r && r.mccbAT ? `${r.mccbAT}` : '-'}
+          </td>
+          <td style={{ padding: '6px 4px', fontSize: 12, textAlign: 'right' }}>
+            {r && r.vd != null ? `${r.vd}V (${r.vdPercent}%)` : '-'}
+          </td>
+          <td style={{ padding: '6px 4px', fontSize: 12 }}>
+            {r && r.ok != null ? <Badge ok={r.ok} label={r.ok ? 'OK' : 'NG'} /> : '-'}
+          </td>
+          <td style={{ padding: '6px 4px', fontSize: 12, textAlign: 'right' }}>
+            {r && r.Isc3 ? `${rd(r.Isc3 / 1000, 1)}kA` : '-'}
+          </td>
+          <td style={{ padding: '6px 2px' }}>
+            <button onClick={e => { e.stopPropagation(); onDelete(node.id); }}
+              style={{ border: 'none', background: 'none', color: '#f44336', cursor: 'pointer', fontSize: 14, padding: '2px 6px' }}>×</button>
+          </td>
+        </tr>
+        {node.children && node.children.map(child => renderNode(child, depth + 1))}
+      </React.Fragment>
+    );
+  };
+
+  return (
+    <div style={{ overflowX: 'auto' }}>
+      <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: 13 }}>
+        <thead>
+          <tr style={{ background: '#fafafa', borderBottom: '2px solid #ddd' }}>
+            <th style={{ padding: '6px 4px', textAlign: 'left', fontSize: 12 }}>名称</th>
+            <th style={{ padding: '6px 4px', textAlign: 'left', fontSize: 12 }}>方式/電圧</th>
+            <th style={{ padding: '6px 4px', textAlign: 'right', fontSize: 12 }}>設計I</th>
+            <th style={{ padding: '6px 4px', textAlign: 'left', fontSize: 12 }}>ケーブル</th>
+            <th style={{ padding: '6px 4px', textAlign: 'right', fontSize: 12 }}>AT</th>
+            <th style={{ padding: '6px 4px', textAlign: 'right', fontSize: 12 }}>e [V]</th>
+            <th style={{ padding: '6px 4px', textAlign: 'left', fontSize: 12 }}>判定</th>
+            <th style={{ padding: '6px 4px', textAlign: 'right', fontSize: 12 }}>Isc₃</th>
+            <th style={{ padding: '6px 4px', fontSize: 12 }}></th>
+          </tr>
+        </thead>
+        <tbody>
+          {tree.map(node => renderNode(node, 0))}
+        </tbody>
+      </table>
     </div>
   );
 }
@@ -592,36 +1299,55 @@ function App() {
     reductionFactor: String(DEFAULT_PARAMS.reductionFactor)
   });
 
-  /* --- 計算結果 --- */
+  /* --- P4: ツリー状態 (§18-7) --- */
+  const [nodes, setNodes] = React.useState([]);
+  const [selectedId, setSelectedId] = React.useState(null);
+  const [editMode, setEditMode] = React.useState('load');
+  const [trParams, setTrParams] = React.useState({ ...DEFAULT_TR_PARAMS });
+  const [trunkParams, setTrunkParams] = React.useState({ ...DEFAULT_TRUNK_PARAMS });
+  const fileInputRef = React.useRef(null);
+
+  /* --- 計算結果（フォームプレビュー用） --- */
   const result = React.useMemo(() => {
-    if (params.capacity <= 0) return null;
+    if (editMode !== 'load' || params.capacity <= 0) return null;
     return runCalc(params);
-  }, [params]);
+  }, [params, editMode]);
+
+  /* --- 全ノード一括計算 --- */
+  const allResults = React.useMemo(() => {
+    if (nodes.length === 0) return {};
+    return calculateAll(nodes);
+  }, [nodes]);
+
+  /* --- 選択中ノードの情報 --- */
+  const selectedNode = nodes.find(n => n.id === selectedId);
+  const selectedResult = selectedId ? allResults[selectedId] : null;
+
+  /* --- 変圧器プレビュー --- */
+  const trPreview = React.useMemo(() => {
+    if (editMode !== 'transformer') return null;
+    return calcTransformer(trParams);
+  }, [trParams, editMode]);
+
+  /* --- 幹線の子回路集計 --- */
+  const trunkChildSummary = React.useMemo(() => {
+    if (editMode !== 'trunk' || !selectedId) return null;
+    return aggregateCurrents(nodes, selectedId, allResults);
+  }, [editMode, selectedId, nodes, allResults]);
 
   /* --- 連動制御ヘルパー (§5) --- */
   const updateSelect = (key, val) => {
     setParams(prev => {
       const next = { ...prev, [key]: val };
-
-      /* 電気方式 → 電圧連動 */
       if (key === 'system') {
         const voltages = VOLTAGE_OPTIONS[val];
-        if (!voltages.includes(prev.voltage)) {
-          next.voltage = voltages[0];
-        }
-        /* 電気方式 → ケーブル種類連動 */
+        if (!voltages.includes(prev.voltage)) next.voltage = voltages[0];
         const cableOpts = getCableTypeOptions(val);
-        if (!cableOpts.includes(prev.cableType)) {
-          next.cableType = cableOpts[0];
-        }
+        if (!cableOpts.includes(prev.cableType)) next.cableType = cableOpts[0];
       }
-
-      /* 回路種別 → 効率連動 */
       if (key === 'circuitType') {
         if (val === '一般') next.efficiency = 1.0;
       }
-
-      /* 多条低減プリセット → 低減率連動 */
       if (key === 'reductionPreset') {
         const preset = RED_PRE.find(p => p.label === val);
         if (preset && preset.factor !== null) {
@@ -629,24 +1355,17 @@ function App() {
           setDisplay(d => ({ ...d, reductionFactor: String(preset.factor) }));
         }
       }
-
       return next;
     });
   };
 
-  /* --- 数値入力の確定 (onBlur) --- */
   const confirmNum = (key) => {
     const raw = display[key];
     const n = parseFloat(raw);
-    if (!isNaN(n)) {
-      setParams(prev => ({ ...prev, [key]: n }));
-    } else {
-      /* 不正な値はparams側の値に復元 */
-      setDisplay(d => ({ ...d, [key]: String(params[key]) }));
-    }
+    if (!isNaN(n)) setParams(prev => ({ ...prev, [key]: n }));
+    else setDisplay(d => ({ ...d, [key]: String(params[key]) }));
   };
 
-  /* --- 数値をライブ更新（スライダー用） --- */
   const updateNumLive = (key, val) => {
     if (typeof val === 'number') {
       setDisplay(d => ({ ...d, [key]: String(val) }));
@@ -654,6 +1373,167 @@ function App() {
     } else {
       setDisplay(d => ({ ...d, [key]: val }));
     }
+  };
+
+  /* --- フォームリセット --- */
+  const resetToNewLoad = () => {
+    setSelectedId(null);
+    setEditMode('load');
+    setParams({ ...DEFAULT_PARAMS });
+    setDisplay({
+      capacity: String(DEFAULT_PARAMS.capacity),
+      powerFactor: String(DEFAULT_PARAMS.powerFactor),
+      efficiency: String(DEFAULT_PARAMS.efficiency),
+      demandFactor: String(DEFAULT_PARAMS.demandFactor),
+      cableLength: String(DEFAULT_PARAMS.cableLength),
+      ambientTemp: String(DEFAULT_PARAMS.ambientTemp),
+      reductionFactor: String(DEFAULT_PARAMS.reductionFactor)
+    });
+  };
+
+  /* --- CRUD: 負荷登録 --- */
+  const handleRegisterLoad = () => {
+    if (!result || !params.trunkName || params.capacity <= 0) return;
+    setNodes(prev => {
+      let updated = [...prev];
+      const trNode = updated.find(n => n.type === 'transformer');
+      let trunk = updated.find(n => n.type === 'trunk' && n.trunk.name === params.trunkName);
+      if (!trunk) {
+        const trId = trNode ? trNode.id : null;
+        trunk = {
+          id: genId(), type: 'trunk', parentId: trId,
+          order: getChildren(updated, trId).length,
+          ts: new Date().toISOString(),
+          trunk: {
+            ...DEFAULT_TRUNK_PARAMS, name: params.trunkName,
+            system: params.system, voltage: params.voltage,
+            freq: params.freq, supplyType: trNode ? '高圧受電' : params.supplyType
+          }
+        };
+        updated = addNode(updated, trunk);
+      }
+      const loadNode = {
+        id: genId(), type: 'load', parentId: trunk.id,
+        order: getChildren(updated, trunk.id).length,
+        ts: new Date().toISOString(),
+        load: { ...params }
+      };
+      updated = addNode(updated, loadNode);
+      return updated;
+    });
+    resetToNewLoad();
+  };
+
+  /* --- CRUD: ノード更新 --- */
+  const handleUpdateNode = () => {
+    if (!selectedId) return;
+    const node = nodes.find(n => n.id === selectedId);
+    if (!node) return;
+    if (node.type === 'load') {
+      setNodes(prev => updateNode(prev, selectedId, { load: { ...params } }));
+    } else if (node.type === 'trunk') {
+      setNodes(prev => updateNode(prev, selectedId, { trunk: { ...trunkParams } }));
+    } else if (node.type === 'transformer') {
+      setNodes(prev => {
+        let updated = updateNode(prev, selectedId, { transformer: { ...trParams } });
+        if (node.transformer.secondaryV !== trParams.secondaryV) {
+          const desc = getDescendants(updated, selectedId);
+          for (const d of desc) {
+            if (d.type === 'trunk') updated = updateNode(updated, d.id, { trunk: { ...d.trunk, voltage: trParams.secondaryV } });
+            else if (d.type === 'load') updated = updateNode(updated, d.id, { load: { ...d.load, voltage: trParams.secondaryV } });
+          }
+        }
+        return updated;
+      });
+    }
+    resetToNewLoad();
+  };
+
+  /* --- CRUD: ノード削除 --- */
+  const handleDeleteNode = (id) => {
+    setNodes(prev => removeNode(prev, id));
+    if (selectedId === id) resetToNewLoad();
+  };
+
+  /* --- CRUD: 変圧器登録/更新 --- */
+  const handleSaveTransformer = () => {
+    if (selectedId && selectedNode?.type === 'transformer') {
+      handleUpdateNode();
+    } else {
+      setNodes(prev => addNode(prev, {
+        id: genId(), type: 'transformer', parentId: null,
+        order: 0, ts: new Date().toISOString(),
+        transformer: { ...trParams }
+      }));
+      resetToNewLoad();
+    }
+  };
+
+  /* --- CRUD: 幹線更新 --- */
+  const handleSaveTrunk = () => {
+    if (selectedId && selectedNode?.type === 'trunk') handleUpdateNode();
+  };
+
+  /* --- 行クリック: ノード選択 --- */
+  const handleSelectNode = (node) => {
+    setSelectedId(node.id);
+    if (node.type === 'transformer') {
+      setEditMode('transformer');
+      setTrParams({ ...node.transformer });
+    } else if (node.type === 'trunk') {
+      setEditMode('trunk');
+      setTrunkParams({ ...node.trunk });
+    } else {
+      setEditMode('load');
+      const p = { ...node.load };
+      setParams(p);
+      setDisplay({
+        capacity: String(p.capacity), powerFactor: String(p.powerFactor),
+        efficiency: String(p.efficiency), demandFactor: String(p.demandFactor),
+        cableLength: String(p.cableLength), ambientTemp: String(p.ambientTemp),
+        reductionFactor: String(p.reductionFactor)
+      });
+    }
+  };
+
+  /* --- Export (§14) --- */
+  const handleExport = () => {
+    const data = { version: 'P4', nodes, exportedAt: new Date().toISOString() };
+    const json = JSON.stringify(data, null, 2);
+    const blob = new Blob([json], { type: 'application/json' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = `幹線計算_${new Date().toISOString().slice(0,10)}.json`;
+    a.click();
+    URL.revokeObjectURL(url);
+  };
+
+  /* --- Import (§14) --- */
+  const handleImport = (e) => {
+    const file = e.target.files[0];
+    if (!file) return;
+    const reader = new FileReader();
+    reader.onload = (ev) => {
+      try {
+        const data = JSON.parse(ev.target.result);
+        if (data.nodes && Array.isArray(data.nodes)) {
+          const existingIds = new Set(nodes.map(n => n.id));
+          const idMap = {};
+          const imported = data.nodes.map(n => {
+            let newId = n.id;
+            if (existingIds.has(n.id)) { newId = genId(); idMap[n.id] = newId; }
+            return { ...n, id: newId };
+          }).map(n => ({
+            ...n, parentId: n.parentId ? (idMap[n.parentId] || n.parentId) : null
+          }));
+          setNodes(prev => [...prev, ...imported]);
+          alert(`${imported.length} ノードをインポートしました`);
+        } else { alert('有効なデータが見つかりません'); }
+      } catch (err) { alert('JSON の読み込みに失敗しました: ' + err.message); }
+      if (fileInputRef.current) fileInputRef.current.value = '';
+    };
+    reader.readAsText(file);
   };
 
   /* --- レンダリング --- */
@@ -664,25 +1544,38 @@ function App() {
   const capacityLabel = params.unit === 'A' ? '電流 [A]' : `負荷容量 [${params.unit}]`;
   const sliderCfgCapacity = params.unit === 'A' ? SLIDER_CFG.capacity_A
     : params.unit === 'kVA' ? SLIDER_CFG.capacity_kVA : SLIDER_CFG.capacity_kW;
-
-  /* 温度補正の表示テキスト */
   const isGround = params.wiringMethod === '直埋布設' || params.wiringMethod === '管路布設';
   const tempBase = isGround ? 25 : 40;
   const tempFactor = getTempFactor(params.wiringMethod, params.ambientTemp);
+
+  const isEditing = selectedId != null;
+  const hasTr = nodes.some(n => n.type === 'transformer');
+  const canRegister = editMode === 'load' && result && params.trunkName && params.capacity > 0 && params.cableLength > 0;
 
   return (
     <div style={{ height: '100vh', display: 'flex', flexDirection: 'column' }}>
       {/* ヘッダー (§2) */}
       <header style={{
         background: '#1976d2', color: '#fff', padding: '8px 16px',
-        display: 'flex', alignItems: 'center', justifyContent: 'space-between',
-        flexShrink: 0
+        display: 'flex', alignItems: 'center', justifyContent: 'space-between', flexShrink: 0
       }}>
         <h1 style={{ fontSize: 18, fontWeight: 700 }}>低圧幹線ケーブル計算ツール</h1>
-        <div style={{ display: 'flex', gap: 8 }}>
-          <button disabled style={{ padding: '4px 12px', borderRadius: 4, border: '1px solid rgba(255,255,255,0.5)', background: 'transparent', color: '#fff', cursor: 'not-allowed', opacity: 0.5, fontSize: 13 }}>Import</button>
-          <button disabled style={{ padding: '4px 12px', borderRadius: 4, border: '1px solid rgba(255,255,255,0.5)', background: 'transparent', color: '#fff', cursor: 'not-allowed', opacity: 0.5, fontSize: 13 }}>Export</button>
-          <button disabled style={{ padding: '4px 12px', borderRadius: 4, border: '1px solid rgba(255,255,255,0.5)', background: 'transparent', color: '#fff', cursor: 'not-allowed', opacity: 0.5, fontSize: 13 }}>PDF出力</button>
+        <div style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
+          <input type="file" accept=".json" ref={fileInputRef} style={{ display: 'none' }} onChange={handleImport} />
+          <button onClick={() => fileInputRef.current?.click()} style={{
+            padding: '4px 12px', borderRadius: 4, border: '1px solid rgba(255,255,255,0.7)',
+            background: 'transparent', color: '#fff', cursor: 'pointer', fontSize: 13
+          }}>Import</button>
+          <button onClick={handleExport} disabled={nodes.length === 0} style={{
+            padding: '4px 12px', borderRadius: 4, border: '1px solid rgba(255,255,255,0.7)',
+            background: 'transparent', color: '#fff',
+            cursor: nodes.length ? 'pointer' : 'not-allowed',
+            opacity: nodes.length ? 1 : 0.5, fontSize: 13
+          }}>Export</button>
+          <button disabled style={{
+            padding: '4px 12px', borderRadius: 4, border: '1px solid rgba(255,255,255,0.5)',
+            background: 'transparent', color: '#fff', cursor: 'not-allowed', opacity: 0.5, fontSize: 13
+          }}>PDF出力</button>
         </div>
       </header>
 
@@ -695,183 +1588,222 @@ function App() {
           background: '#fff', borderRight: '1px solid #ddd', padding: 16
         }}>
 
-          {/* === 回路情報 (§3-1) === */}
-          <Sec title="回路情報">
-            <RC label="幹線番号/名称">
-              <input type="text" value={params.trunkName} style={{ ...numStyle, textAlign: 'left' }}
-                onChange={e => setParams(p => ({ ...p, trunkName: e.target.value }))} placeholder="例: L-1A" />
-            </RC>
-            <RC label="負荷名称">
-              <input type="text" value={params.loadName} style={{ ...numStyle, textAlign: 'left' }}
-                onChange={e => setParams(p => ({ ...p, loadName: e.target.value }))} placeholder="例: 空調機" />
-            </RC>
-            <RC label="電気方式">
-              <select value={params.system} style={selStyle} onChange={e => updateSelect('system', e.target.value)}>
-                {['単相2線式', '単相3線式', '三相3線式', '三相4線式'].map(s => <option key={s}>{s}</option>)}
-              </select>
-            </RC>
-            <RC label="電圧 [V]">
-              <select value={params.voltage} style={selStyle} onChange={e => updateSelect('voltage', Number(e.target.value))}>
-                {voltageOptions.map(v => <option key={v} value={v}>{params.system === '単相3線式' ? '100/200' : v}</option>)}
-              </select>
-            </RC>
-            <RC label="周波数">
-              <select value={params.freq} style={selStyle} onChange={e => updateSelect('freq', e.target.value)}>
-                <option>50Hz</option><option>60Hz</option>
-              </select>
-            </RC>
-            <RC label="供給方式">
-              <select value={params.supplyType} style={selStyle} onChange={e => updateSelect('supplyType', e.target.value)}>
-                <option>低圧受電</option><option>高圧受電</option>
-              </select>
-            </RC>
-            <RC label="回路種別">
-              <select value={params.circuitType} style={selStyle} onChange={e => updateSelect('circuitType', e.target.value)}>
-                <option>一般</option><option>電動機</option>
-              </select>
-            </RC>
-            <RC label="MCCB AT">
-              <select value={params.mccbATOverride} style={selStyle} onChange={e => updateSelect('mccbATOverride', e.target.value)}>
-                <option>自動</option>
-                {MCCB_AT.map(at => <option key={at} value={at}>{at} AT</option>)}
-              </select>
-            </RC>
-          </Sec>
-
-          {/* === 負荷条件 (§3-2) === */}
-          <Sec title="負荷条件">
-            <RC label={capacityLabel}>
-              <div style={{ display: 'flex', gap: 6 }}>
-                <div style={{ flex: 1 }}>
-                  <SliderInput
-                    value={params.capacity}
-                    displayValue={display.capacity}
-                    cfg={sliderCfgCapacity}
-                    min={0}
-                    onChange={v => updateNumLive('capacity', v)}
-                    onConfirm={() => confirmNum('capacity')}
-                  />
-                </div>
-                <select value={params.unit} style={{ ...selStyle, width: 70, flex: 'none' }}
-                  onChange={e => updateSelect('unit', e.target.value)}>
-                  <option>kW</option><option>kVA</option><option>A</option>
-                </select>
-              </div>
-            </RC>
-            <RC label="力率 cosθ">
-              <SliderInput
-                value={params.powerFactor}
-                displayValue={display.powerFactor}
-                cfg={SLIDER_CFG.powerFactor}
-                min={0.10} max={1.00}
-                onChange={v => updateNumLive('powerFactor', v)}
-                onConfirm={() => confirmNum('powerFactor')}
-              />
-            </RC>
-            <RC label="効率 η" show={isMotor}>
-              <SliderInput
-                value={params.efficiency}
-                displayValue={display.efficiency}
-                cfg={SLIDER_CFG.efficiency}
-                min={0.10} max={1.00}
-                onChange={v => updateNumLive('efficiency', v)}
-                onConfirm={() => confirmNum('efficiency')}
-              />
-            </RC>
-            <RC label="需要率 [%]">
-              <SliderInput
-                value={params.demandFactor}
-                displayValue={display.demandFactor}
-                cfg={SLIDER_CFG.demandFactor}
-                min={1} max={100}
-                onChange={v => updateNumLive('demandFactor', v)}
-                onConfirm={() => confirmNum('demandFactor')}
-              />
-            </RC>
-            <RC label="こう長 [m]">
-              <SliderInput
-                value={params.cableLength}
-                displayValue={display.cableLength}
-                cfg={SLIDER_CFG.cableLength}
-                min={0.1}
-                onChange={v => updateNumLive('cableLength', v)}
-                onConfirm={() => confirmNum('cableLength')}
-              />
-            </RC>
-          </Sec>
-
-          {/* === ケーブル条件 (§3-3) === */}
-          <Sec title="ケーブル条件">
-            <RC label="ケーブル種類">
-              <select value={params.cableType} style={selStyle} onChange={e => updateSelect('cableType', e.target.value)}>
-                {cableTypeOptions.map(c => <option key={c}>{c}</option>)}
-              </select>
-            </RC>
-            <RC label="配線方式">
-              <select value={params.wiringMethod} style={selStyle} onChange={e => updateSelect('wiringMethod', e.target.value)}>
-                {['ケーブルラック配線', '配管配線', '直埋布設', '管路布設'].map(w => <option key={w}>{w}</option>)}
-              </select>
-            </RC>
-            <RC label="周囲温度 [℃]">
-              <SliderInput
-                value={params.ambientTemp}
-                displayValue={display.ambientTemp}
-                cfg={SLIDER_CFG.ambientTemp}
-                min={20} max={50}
-                onChange={v => updateNumLive('ambientTemp', v)}
-                onConfirm={() => confirmNum('ambientTemp')}
-              />
-              <div style={{ fontSize: 11, color: '#888', marginTop: 2 }}>
-                基底 {tempBase}℃ → 補正係数 {rd(tempFactor, 3)}
-                {isGround ? '（地中）' : '（気中）'}
-              </div>
-            </RC>
-            <RC label="多条低減プリセット">
-              <select value={params.reductionPreset} style={selStyle}
-                onChange={e => updateSelect('reductionPreset', e.target.value)}>
-                {RED_PRE.map(p => (
-                  <option key={p.label} value={p.label}>
-                    {p.label}{p.factor !== null ? ` (${p.factor})` : ''}
-                  </option>
-                ))}
-              </select>
-            </RC>
-            <RC label="低減率" show={isCustomReduction}>
-              <SliderInput
-                value={params.reductionFactor}
-                displayValue={display.reductionFactor}
-                cfg={SLIDER_CFG.reductionFactor}
-                min={0.10} max={1.00}
-                onChange={v => updateNumLive('reductionFactor', v)}
-                onConfirm={() => confirmNum('reductionFactor')}
-              />
-            </RC>
-            {!isCustomReduction && (
-              <RC label="低減率">
-                <span style={{ fontSize: 13, color: '#333' }}>{params.reductionFactor}</span>
-              </RC>
+          {/* モード切替タブ */}
+          <div style={{ display: 'flex', gap: 4, marginBottom: 12, flexWrap: 'wrap' }}>
+            {!hasTr && (
+              <button onClick={() => { setEditMode('transformer'); setSelectedId(null); setTrParams({ ...DEFAULT_TR_PARAMS }); }}
+                style={{
+                  padding: '6px 12px', borderRadius: 4,
+                  border: editMode === 'transformer' ? '2px solid #1976d2' : '1px solid #ccc',
+                  background: editMode === 'transformer' ? '#e3f2fd' : '#fff',
+                  cursor: 'pointer', fontSize: 12, fontWeight: 600
+                }}>+ 変圧器</button>
             )}
-          </Sec>
+            <button onClick={resetToNewLoad}
+              style={{
+                padding: '6px 12px', borderRadius: 4,
+                border: editMode === 'load' && !isEditing ? '2px solid #1976d2' : '1px solid #ccc',
+                background: editMode === 'load' && !isEditing ? '#e3f2fd' : '#fff',
+                cursor: 'pointer', fontSize: 12, fontWeight: 600
+              }}>+ 負荷回路</button>
+          </div>
 
-          {/* 登録ボタン（P4 で有効化） */}
-          <button disabled style={{
-            width: '100%', padding: '10px', borderRadius: 6,
-            border: 'none', background: '#e0e0e0', color: '#999',
-            fontSize: 14, fontWeight: 700, cursor: 'not-allowed'
-          }}>登録（P4 で実装）</button>
+          {/* === 変圧器フォーム === */}
+          {editMode === 'transformer' && (
+            <TransformerForm
+              trParams={trParams} setTrParams={setTrParams}
+              onSave={handleSaveTransformer} onCancel={resetToNewLoad}
+              isEdit={isEditing && selectedNode?.type === 'transformer'}
+            />
+          )}
 
+          {/* === 幹線フォーム === */}
+          {editMode === 'trunk' && (
+            <TrunkForm
+              trunkParams={trunkParams} setTrunkParams={setTrunkParams}
+              onSave={handleSaveTrunk} onCancel={resetToNewLoad}
+              isEdit={isEditing && selectedNode?.type === 'trunk'}
+              childSummary={trunkChildSummary}
+            />
+          )}
+
+          {/* === 負荷回路フォーム（既存） === */}
+          {editMode === 'load' && (
+            <div>
+              <Sec title="回路情報">
+                <RC label="幹線番号/名称">
+                  <input type="text" value={params.trunkName} style={{ ...numStyle, textAlign: 'left' }}
+                    onChange={e => setParams(p => ({ ...p, trunkName: e.target.value }))} placeholder="例: L-1A" />
+                </RC>
+                <RC label="負荷名称">
+                  <input type="text" value={params.loadName} style={{ ...numStyle, textAlign: 'left' }}
+                    onChange={e => setParams(p => ({ ...p, loadName: e.target.value }))} placeholder="例: 空調機" />
+                </RC>
+                <RC label="電気方式">
+                  <select value={params.system} style={selStyle} onChange={e => updateSelect('system', e.target.value)}>
+                    {['単相2線式', '単相3線式', '三相3線式', '三相4線式'].map(s => <option key={s}>{s}</option>)}
+                  </select>
+                </RC>
+                <RC label="電圧 [V]">
+                  <select value={params.voltage} style={selStyle} onChange={e => updateSelect('voltage', Number(e.target.value))}>
+                    {voltageOptions.map(v => <option key={v} value={v}>{params.system === '単相3線式' ? '100/200' : v}</option>)}
+                  </select>
+                </RC>
+                <RC label="周波数">
+                  <select value={params.freq} style={selStyle} onChange={e => updateSelect('freq', e.target.value)}>
+                    <option>50Hz</option><option>60Hz</option>
+                  </select>
+                </RC>
+                <RC label="供給方式">
+                  <select value={params.supplyType} style={selStyle} onChange={e => updateSelect('supplyType', e.target.value)}>
+                    <option>低圧受電</option><option>高圧受電</option>
+                  </select>
+                </RC>
+                <RC label="回路種別">
+                  <select value={params.circuitType} style={selStyle} onChange={e => updateSelect('circuitType', e.target.value)}>
+                    <option>一般</option><option>電動機</option>
+                  </select>
+                </RC>
+                <RC label="MCCB AT">
+                  <select value={params.mccbATOverride} style={selStyle} onChange={e => updateSelect('mccbATOverride', e.target.value)}>
+                    <option>自動</option>
+                    {MCCB_AT.map(at => <option key={at} value={at}>{at} AT</option>)}
+                  </select>
+                </RC>
+              </Sec>
+
+              <Sec title="負荷条件">
+                <RC label={capacityLabel}>
+                  <div style={{ display: 'flex', gap: 6 }}>
+                    <div style={{ flex: 1 }}>
+                      <SliderInput value={params.capacity} displayValue={display.capacity}
+                        cfg={sliderCfgCapacity} min={0}
+                        onChange={v => updateNumLive('capacity', v)} onConfirm={() => confirmNum('capacity')} />
+                    </div>
+                    <select value={params.unit} style={{ ...selStyle, width: 70, flex: 'none' }}
+                      onChange={e => updateSelect('unit', e.target.value)}>
+                      <option>kW</option><option>kVA</option><option>A</option>
+                    </select>
+                  </div>
+                </RC>
+                <RC label="力率 cosθ">
+                  <SliderInput value={params.powerFactor} displayValue={display.powerFactor}
+                    cfg={SLIDER_CFG.powerFactor} min={0.10} max={1.00}
+                    onChange={v => updateNumLive('powerFactor', v)} onConfirm={() => confirmNum('powerFactor')} />
+                </RC>
+                <RC label="効率 η" show={isMotor}>
+                  <SliderInput value={params.efficiency} displayValue={display.efficiency}
+                    cfg={SLIDER_CFG.efficiency} min={0.10} max={1.00}
+                    onChange={v => updateNumLive('efficiency', v)} onConfirm={() => confirmNum('efficiency')} />
+                </RC>
+                <RC label="需要率 [%]">
+                  <SliderInput value={params.demandFactor} displayValue={display.demandFactor}
+                    cfg={SLIDER_CFG.demandFactor} min={1} max={100}
+                    onChange={v => updateNumLive('demandFactor', v)} onConfirm={() => confirmNum('demandFactor')} />
+                </RC>
+                <RC label="こう長 [m]">
+                  <SliderInput value={params.cableLength} displayValue={display.cableLength}
+                    cfg={SLIDER_CFG.cableLength} min={0.1}
+                    onChange={v => updateNumLive('cableLength', v)} onConfirm={() => confirmNum('cableLength')} />
+                </RC>
+              </Sec>
+
+              <Sec title="ケーブル条件">
+                <RC label="ケーブル種類">
+                  <select value={params.cableType} style={selStyle} onChange={e => updateSelect('cableType', e.target.value)}>
+                    {cableTypeOptions.map(c => <option key={c}>{c}</option>)}
+                  </select>
+                </RC>
+                <RC label="配線方式">
+                  <select value={params.wiringMethod} style={selStyle} onChange={e => updateSelect('wiringMethod', e.target.value)}>
+                    {['ケーブルラック配線', '配管配線', '直埋布設', '管路布設'].map(w => <option key={w}>{w}</option>)}
+                  </select>
+                </RC>
+                <RC label="周囲温度 [℃]">
+                  <SliderInput value={params.ambientTemp} displayValue={display.ambientTemp}
+                    cfg={SLIDER_CFG.ambientTemp} min={20} max={50}
+                    onChange={v => updateNumLive('ambientTemp', v)} onConfirm={() => confirmNum('ambientTemp')} />
+                  <div style={{ fontSize: 11, color: '#888', marginTop: 2 }}>
+                    基底 {tempBase}℃ → 補正係数 {rd(tempFactor, 3)}
+                    {isGround ? '（地中）' : '（気中）'}
+                  </div>
+                </RC>
+                <RC label="多条低減プリセット">
+                  <select value={params.reductionPreset} style={selStyle}
+                    onChange={e => updateSelect('reductionPreset', e.target.value)}>
+                    {RED_PRE.map(p => (
+                      <option key={p.label} value={p.label}>
+                        {p.label}{p.factor !== null ? ` (${p.factor})` : ''}
+                      </option>
+                    ))}
+                  </select>
+                </RC>
+                <RC label="低減率" show={isCustomReduction}>
+                  <SliderInput value={params.reductionFactor} displayValue={display.reductionFactor}
+                    cfg={SLIDER_CFG.reductionFactor} min={0.10} max={1.00}
+                    onChange={v => updateNumLive('reductionFactor', v)} onConfirm={() => confirmNum('reductionFactor')} />
+                </RC>
+                {!isCustomReduction && (
+                  <RC label="低減率">
+                    <span style={{ fontSize: 13, color: '#333' }}>{params.reductionFactor}</span>
+                  </RC>
+                )}
+              </Sec>
+
+              {/* 登録/更新ボタン */}
+              {isEditing ? (
+                <div style={{ display: 'flex', gap: 8 }}>
+                  <button onClick={handleUpdateNode} style={{
+                    flex: 1, padding: '10px', borderRadius: 6, border: 'none',
+                    background: '#1976d2', color: '#fff', fontSize: 14, fontWeight: 700, cursor: 'pointer'
+                  }}>更新</button>
+                  <button onClick={resetToNewLoad} style={{
+                    padding: '10px 16px', borderRadius: 6, border: '1px solid #ccc',
+                    background: '#fff', color: '#666', fontSize: 14, cursor: 'pointer'
+                  }}>取消</button>
+                </div>
+              ) : (
+                <button onClick={handleRegisterLoad} disabled={!canRegister} style={{
+                  width: '100%', padding: '10px', borderRadius: 6, border: 'none',
+                  background: canRegister ? '#4caf50' : '#e0e0e0',
+                  color: canRegister ? '#fff' : '#999',
+                  fontSize: 14, fontWeight: 700,
+                  cursor: canRegister ? 'pointer' : 'not-allowed'
+                }}>+ 登録</button>
+              )}
+            </div>
+          )}
         </div>
 
-        {/* 右ペイン: 選定結果 + 登録一覧（P4） */}
+        {/* 右ペイン: 選定結果 + 登録一覧 */}
         <div style={{ flex: 1, overflowY: 'auto', padding: 16, background: '#fafafa' }}>
-          <ResultPanel result={result} params={params} />
+          {/* 結果パネル（モード別） */}
+          {editMode === 'transformer' && (
+            <TransformerResultPanel
+              result={isEditing ? selectedResult : trPreview}
+              nodes={nodes} nodeId={selectedId} allResults={allResults}
+            />
+          )}
+          {editMode === 'trunk' && selectedResult && (
+            <ResultPanel result={selectedResult} params={selectedNode?.trunk || trunkParams} />
+          )}
+          {editMode === 'load' && (
+            <ResultPanel result={isEditing ? selectedResult : result} params={params} />
+          )}
 
-          {/* 登録一覧テーブル（P4 で実装） */}
+          {/* 登録一覧テーブル */}
           <div style={{
             marginTop: 24, padding: 16, background: '#fff',
-            border: '1px solid #e0e0e0', borderRadius: 8, color: '#999', fontSize: 13
+            border: '1px solid #e0e0e0', borderRadius: 8
           }}>
-            登録一覧テーブル（P4 で実装）
+            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 12 }}>
+              <span style={{ fontSize: 14, fontWeight: 700, color: '#333' }}>登録一覧</span>
+              <span style={{ fontSize: 12, color: '#999' }}>{nodes.length} ノード</span>
+            </div>
+            <TreeTable
+              nodes={nodes} allResults={allResults} selectedId={selectedId}
+              onSelect={handleSelectNode} onDelete={handleDeleteNode}
+            />
           </div>
         </div>
 
