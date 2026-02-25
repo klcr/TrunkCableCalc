@@ -621,28 +621,30 @@ function calcCumulativeVd(nodes, nodeId, parentCumVd, allResults) {
  * calcFaultCurrents — トップダウン R+jX ベクトル累積による短絡電流計算 (§20-2, §20-3)
  */
 function calcFaultCurrents(nodes, allResults) {
-  const tr = nodes.find(n => n.type === 'transformer');
-  if (!tr) return;
-  const trR = allResults[tr.id];
-  if (!trR) return;
-  /* M2-3: HV cable impedance LV conversion (§20-2)
-   * 高圧ケーブルインピーダンスを LV 側に換算して Rsrc, Xsrc に加算する。
-   * P4 では hvSystem フィールドは全て null のため実行されない。
-   *
-   * const hv = tr.transformer.hvSystem;
-   * let Rsrc = trR.Rs, Xsrc = trR.Xs;
-   * if (hv && hv.cableType && hv.cableSize_mm2 && hv.totalCableLength_km) {
-   *   const freq = '50Hz'; // TODO: 系統周波数を transformer に持たせる
-   *   const hvImp = IMP_HV[freq] && IMP_HV[freq][String(hv.cableSize_mm2)];
-   *   if (hvImp) {
-   *     const ratio = Math.pow(tr.transformer.secondaryV / tr.transformer.primaryV, 2);
-   *     Rsrc += hvImp[0] * hv.totalCableLength_km * ratio;
-   *     Xsrc += hvImp[1] * hv.totalCableLength_km * ratio;
-   *   }
-   * }
-   * propagateFault(nodes, tr.id, Rsrc, Xsrc, tr.transformer.secondaryV, allResults);
-   */
-  propagateFault(nodes, tr.id, trR.Rs, trR.Xs, tr.transformer.secondaryV, allResults);
+  /* M2-1: 複数変圧器対応 — 全 transformer ノードをループ */
+  const transformers = nodes.filter(n => n.type === 'transformer');
+  for (const tr of transformers) {
+    const trR = allResults[tr.id];
+    if (!trR) continue;
+    /* M2-3: HV cable impedance LV conversion (§20-2)
+     * 高圧ケーブルインピーダンスを LV 側に換算して Rsrc, Xsrc に加算する。
+     * P4 では hvSystem フィールドは全て null のため実行されない。
+     *
+     * const hv = tr.transformer.hvSystem;
+     * let Rsrc = trR.Rs, Xsrc = trR.Xs;
+     * if (hv && hv.cableType && hv.cableSize_mm2 && hv.totalCableLength_km) {
+     *   const freq = '50Hz'; // TODO: 系統周波数を transformer に持たせる
+     *   const hvImp = IMP_HV[freq] && IMP_HV[freq][String(hv.cableSize_mm2)];
+     *   if (hvImp) {
+     *     const ratio = Math.pow(tr.transformer.secondaryV / tr.transformer.primaryV, 2);
+     *     Rsrc += hvImp[0] * hv.totalCableLength_km * ratio;
+     *     Xsrc += hvImp[1] * hv.totalCableLength_km * ratio;
+     *   }
+     * }
+     * propagateFault(nodes, tr.id, Rsrc, Xsrc, tr.transformer.secondaryV, allResults);
+     */
+    propagateFault(nodes, tr.id, trR.Rs, trR.Xs, tr.transformer.secondaryV, allResults);
+  }
 }
 
 function propagateFault(nodes, nodeId, Rcum, Xcum, Vs, allResults) {
@@ -733,6 +735,597 @@ function calculateAll(nodes) {
    */
 
   return results;
+}
+
+/* === DIAGRAM: DIRECTION FRAMEWORK (M2-4-7) === */
+
+const DIRECTIONS = {
+  horizontal: {
+    mainAxis: 'x', crossAxis: 'y',
+    inPort: 'left', outPort: 'right',
+    label: '横型（左→右）'
+  },
+  vertical: {
+    mainAxis: 'y', crossAxis: 'x',
+    inPort: 'top', outPort: 'bottom',
+    label: '縦型（上→下）'
+  }
+};
+
+/* モジュールサイズ定数 */
+const MOD = {
+  TR_W: 200, TR_H: 80,
+  TRUNK_W: 260, TRUNK_H: 64,
+  LOAD_W: 220, LOAD_H: 56,
+  RECV_W: 100, RECV_H: 50,
+  PORT_R: 5,
+  GAP_MAIN: 120,    /* 主軸方向（左→右）の間隔 */
+  GAP_CROSS: 20,    /* 交差軸方向（上→下）の兄弟間隔 */
+  MARGIN: 40
+};
+
+/* === DIAGRAM: SYMBOLS (M2-4-3) === */
+
+function SvgTransformer({ x, y, w, h, connection }) {
+  const r = Math.min(w, h) * 0.22;
+  const cx = x + w / 2, cy = y + h / 2;
+  const [pri, sec] = (connection || 'Δ-Y').split('-');
+  return (
+    <g>
+      <rect x={x} y={y} width={w} height={h} rx={4} fill="#f3e5f5" stroke="#7b1fa2" strokeWidth={1.5} />
+      <circle cx={cx - r * 0.5} cy={cy} r={r} fill="none" stroke="#333" strokeWidth={1.5} />
+      <circle cx={cx + r * 0.5} cy={cy} r={r} fill="none" stroke="#333" strokeWidth={1.5} />
+      <text x={cx - r * 0.5} y={cy - r - 4} fontSize={9} textAnchor="middle" fill="#555">{pri}</text>
+      <text x={cx + r * 0.5} y={cy - r - 4} fontSize={9} textAnchor="middle" fill="#555">{sec}</text>
+    </g>
+  );
+}
+
+function SvgMCCB({ x, y, w, h }) {
+  w = w || 20; h = h || 14;
+  return (
+    <g>
+      <rect x={x - w / 2} y={y - h / 2} width={w} height={h} fill="#fff" stroke="#333" strokeWidth={1.2} />
+      <line x1={x - w / 4} y1={y - h / 2} x2={x + w / 4} y2={y + h / 2} stroke="#333" strokeWidth={1.2} />
+    </g>
+  );
+}
+
+function SvgMotor({ x, y, r }) {
+  r = r || 12;
+  return (
+    <g>
+      <circle cx={x} cy={y} r={r} fill="#e3f2fd" stroke="#1565c0" strokeWidth={1.5} />
+      <text x={x} y={y + 4} fontSize={10} textAnchor="middle" fontWeight={700} fill="#1565c0">M</text>
+    </g>
+  );
+}
+
+function SvgLoad({ x, y, r }) {
+  r = r || 12;
+  return (
+    <g>
+      <polygon points={`${x},${y - r} ${x + r},${y + r * 0.6} ${x - r},${y + r * 0.6}`}
+        fill="#fff3e0" stroke="#e65100" strokeWidth={1.5} />
+    </g>
+  );
+}
+
+function SvgBusBar({ x, y, width }) {
+  return <rect x={x} y={y - 2} width={width} height={4} fill="#333" rx={1} />;
+}
+
+function SvgPort({ x, y, active, onMouseDown, type }) {
+  return (
+    <circle cx={x} cy={y} r={MOD.PORT_R}
+      fill={active ? '#1976d2' : '#fff'} stroke={active ? '#1976d2' : '#999'} strokeWidth={1.5}
+      style={{ cursor: 'crosshair' }}
+      onMouseDown={onMouseDown}
+      data-port-type={type}
+    />
+  );
+}
+
+function SvgVCB({ x, y }) {
+  const r = 8;
+  return (
+    <g>
+      <circle cx={x} cy={y} r={r} fill="#fff" stroke="#333" strokeWidth={1.5} />
+      <line x1={x - 4} y1={y - 4} x2={x + 4} y2={y + 4} stroke="#333" strokeWidth={1.2} />
+      <line x1={x + 4} y1={y - 4} x2={x - 4} y2={y + 4} stroke="#333" strokeWidth={1.2} />
+    </g>
+  );
+}
+
+/* === DIAGRAM: AUTO LAYOUT (M2-4-8) === */
+
+function autoLayout(nodes, direction) {
+  const dir = DIRECTIONS[direction || 'horizontal'];
+  const tree = buildTree(nodes);
+  if (tree.length === 0) return {};
+  const positions = {};
+
+  /* サブツリーの交差軸方向のサイズを再帰的に計測 */
+  function measureCross(node) {
+    if (!node.children || node.children.length === 0) {
+      const s = nodeSize(node.type);
+      return dir.crossAxis === 'y' ? s.h : s.w;
+    }
+    let total = 0;
+    for (let i = 0; i < node.children.length; i++) {
+      if (i > 0) total += MOD.GAP_CROSS;
+      total += measureCross(node.children[i]);
+    }
+    const s = nodeSize(node.type);
+    const minSelf = dir.crossAxis === 'y' ? s.h : s.w;
+    return Math.max(total, minSelf);
+  }
+
+  function nodeSize(type) {
+    switch (type) {
+      case 'transformer': return { w: MOD.TR_W, h: MOD.TR_H };
+      case 'trunk': return { w: MOD.TRUNK_W, h: MOD.TRUNK_H };
+      case 'load': return { w: MOD.LOAD_W, h: MOD.LOAD_H };
+      default: return { w: 100, h: 50 };
+    }
+  }
+
+  /* 再帰的に座標を割り当て */
+  function assign(node, mainPos, crossStart) {
+    const s = nodeSize(node.type);
+    const subtreeCross = measureCross(node);
+    const selfCross = dir.crossAxis === 'y' ? s.h : s.w;
+    const selfMain = dir.mainAxis === 'x' ? s.w : s.h;
+    const cx = crossStart + (subtreeCross - selfCross) / 2;
+
+    if (dir.mainAxis === 'x') {
+      positions[node.id] = { x: mainPos, y: cx, width: s.w, height: s.h };
+    } else {
+      positions[node.id] = { x: cx, y: mainPos, width: s.w, height: s.h };
+    }
+
+    if (node.children && node.children.length > 0) {
+      let childCross = crossStart;
+      const childMain = mainPos + selfMain + MOD.GAP_MAIN;
+      for (let i = 0; i < node.children.length; i++) {
+        if (i > 0) childCross += MOD.GAP_CROSS;
+        assign(node.children[i], childMain, childCross);
+        childCross += measureCross(node.children[i]);
+      }
+    }
+  }
+
+  /* 各ルートを配置 */
+  let crossOffset = MOD.MARGIN;
+  for (let i = 0; i < tree.length; i++) {
+    if (i > 0) crossOffset += MOD.GAP_CROSS * 2;
+    assign(tree[i], MOD.MARGIN, crossOffset);
+    crossOffset += measureCross(tree[i]);
+  }
+
+  return positions;
+}
+
+/* canvas 座標が未設定のノードに自動配置を適用 */
+function ensureCanvasPositions(nodes, direction) {
+  const needsLayout = nodes.some(n => !n.canvas || n.canvas.x == null);
+  if (!needsLayout) return nodes;
+  const positions = autoLayout(nodes, direction);
+  return nodes.map(n => {
+    if (n.canvas && n.canvas.x != null) return n;
+    const pos = positions[n.id];
+    return pos ? { ...n, canvas: pos } : { ...n, canvas: { x: 0, y: 0, width: 100, height: 50 } };
+  });
+}
+
+/* === DIAGRAM: CONNECTION LINE (M2-4-4) === */
+
+function ConnectionLine({ fromCanvas, toCanvas, direction, ok, selected }) {
+  const dir = DIRECTIONS[direction || 'horizontal'];
+  let fx, fy, tx, ty;
+  if (dir.outPort === 'right') {
+    fx = fromCanvas.x + fromCanvas.width;
+    fy = fromCanvas.y + fromCanvas.height / 2;
+    tx = toCanvas.x;
+    ty = toCanvas.y + toCanvas.height / 2;
+  } else {
+    fx = fromCanvas.x + fromCanvas.width / 2;
+    fy = fromCanvas.y + fromCanvas.height;
+    tx = toCanvas.x + toCanvas.width / 2;
+    ty = toCanvas.y;
+  }
+  const mx = (fx + tx) / 2;
+  const my = (fy + ty) / 2;
+  const d = dir.outPort === 'right'
+    ? `M${fx},${fy} C${mx},${fy} ${mx},${ty} ${tx},${ty}`
+    : `M${fx},${fy} C${fx},${my} ${tx},${my} ${tx},${ty}`;
+  return (
+    <path d={d}
+      fill="none"
+      stroke={selected ? '#1976d2' : ok === false ? '#c00' : '#666'}
+      strokeWidth={selected ? 2.5 : 1.5}
+      strokeDasharray={ok === false ? '4 2' : 'none'}
+    />
+  );
+}
+
+/* === DIAGRAM: MODULE COMPONENTS (M2-4-2) === */
+
+function ModuleTransformer({ node, result, canvas, selected, mode, direction, onMouseDown, onClick, onPortMouseDown }) {
+  const { x, y, width: w, height: h } = canvas;
+  const dir = DIRECTIONS[direction || 'horizontal'];
+  const tr = node.transformer || {};
+  const inX = dir.inPort === 'left' ? x : x + w / 2;
+  const inY = dir.inPort === 'left' ? y + h / 2 : y;
+  const outX = dir.outPort === 'right' ? x + w : x + w / 2;
+  const outY = dir.outPort === 'right' ? y + h / 2 : y + h;
+  return (
+    <g style={{ cursor: mode === 'edit' ? 'grab' : 'pointer' }}
+       onMouseDown={mode === 'edit' ? onMouseDown : undefined}
+       onClick={onClick}>
+      <SvgTransformer x={x} y={y} w={w} h={h} connection={tr.connection} />
+      {selected && <rect x={x - 2} y={y - 2} width={w + 4} height={h + 4} rx={6} fill="none" stroke="#1976d2" strokeWidth={2} strokeDasharray="4 2" />}
+      <text x={x + w / 2} y={y - 6} fontSize={10} textAnchor="middle" fontWeight={700} fill="#333">{tr.name || 'TR'}</text>
+      <text x={x + w / 2} y={y + h + 12} fontSize={8} textAnchor="middle" fill="#666">
+        {tr.capacity_kVA || ''}kVA {tr.primaryV || ''}/{tr.secondaryV || ''}V
+      </text>
+      {result && <text x={x + w / 2} y={y + h + 22} fontSize={8} textAnchor="middle" fill="#666">
+        Isc₃={rd(result.Isc3 / 1000, 1)}kA  %Z={tr.pctZ}
+      </text>}
+      {mode === 'edit' && (
+        <>
+          <SvgPort x={inX} y={inY} type="in" onMouseDown={e => { e.stopPropagation(); onPortMouseDown && onPortMouseDown(node.id, 'in', e); }} />
+          <SvgPort x={outX} y={outY} type="out" onMouseDown={e => { e.stopPropagation(); onPortMouseDown && onPortMouseDown(node.id, 'out', e); }} />
+        </>
+      )}
+    </g>
+  );
+}
+
+function ModuleTrunk({ node, result, canvas, selected, mode, direction, onMouseDown, onClick, onPortMouseDown }) {
+  const { x, y, width: w, height: h } = canvas;
+  const dir = DIRECTIONS[direction || 'horizontal'];
+  const tr = node.trunk || {};
+  const ok = result ? result.ok : null;
+  const borderColor = ok === false ? '#c00' : ok ? '#4caf50' : '#999';
+  const bgColor = ok === false ? '#fff5f5' : '#fff';
+  const outX = dir.outPort === 'right' ? x + w : x + w / 2;
+  const outY = dir.outPort === 'right' ? y + h / 2 : y + h;
+  const inX = dir.inPort === 'left' ? x : x + w / 2;
+  const inY = dir.inPort === 'left' ? y + h / 2 : y;
+  const sizeStr = result ? `${result.size}${result.parallel > 1 ? '×' + result.parallel : ''}` : '';
+  return (
+    <g style={{ cursor: mode === 'edit' ? 'grab' : 'pointer' }}
+       onMouseDown={mode === 'edit' ? onMouseDown : undefined}
+       onClick={onClick}>
+      <rect x={x} y={y} width={w} height={h} rx={4} fill={bgColor} stroke={borderColor} strokeWidth={1.5} />
+      {selected && <rect x={x - 2} y={y - 2} width={w + 4} height={h + 4} rx={6} fill="none" stroke="#1976d2" strokeWidth={2} strokeDasharray="4 2" />}
+      {/* MCCB シンボル (左端内部) */}
+      <SvgMCCB x={x + 18} y={y + h / 2} />
+      {result && <text x={x + 36} y={y + h / 2 - 6} fontSize={8} fill="#333">{result.mccbAT}AT</text>}
+      {/* ケーブル表記 */}
+      <text x={x + 36} y={y + h / 2 + 5} fontSize={8} fill="#555">{tr.cableType} {sizeStr}</text>
+      <text x={x + 36} y={y + h / 2 + 15} fontSize={7} fill="#888">{tr.cableLength}m</text>
+      {/* 名称 */}
+      <text x={x + w / 2} y={y - 5} fontSize={10} textAnchor="middle" fontWeight={600} fill="#333">{tr.name || '幹線'}</text>
+      {/* 電流・電圧降下 */}
+      {result && (
+        <text x={x + w - 6} y={y + h / 2 + 3} fontSize={8} textAnchor="end" fill="#666">
+          {rd(result.dI, 1)}A  e={result.vdPercent}%
+        </text>
+      )}
+      {/* 判定バッジ */}
+      {ok != null && (
+        <g>
+          <rect x={x + w - 22} y={y + 3} width={18} height={12} rx={2} fill={ok ? '#e8f5e9' : '#ffebee'} stroke={ok ? '#4caf50' : '#c00'} strokeWidth={0.8} />
+          <text x={x + w - 13} y={y + 12} fontSize={7} textAnchor="middle" fontWeight={700} fill={ok ? '#2e7d32' : '#c00'}>{ok ? 'OK' : 'NG'}</text>
+        </g>
+      )}
+      {mode === 'edit' && (
+        <>
+          <SvgPort x={inX} y={inY} type="in" onMouseDown={e => { e.stopPropagation(); onPortMouseDown && onPortMouseDown(node.id, 'in', e); }} />
+          <SvgPort x={outX} y={outY} type="out" onMouseDown={e => { e.stopPropagation(); onPortMouseDown && onPortMouseDown(node.id, 'out', e); }} />
+        </>
+      )}
+    </g>
+  );
+}
+
+function ModuleLoadNode({ node, result, canvas, selected, mode, direction, onMouseDown, onClick, onPortMouseDown }) {
+  const { x, y, width: w, height: h } = canvas;
+  const dir = DIRECTIONS[direction || 'horizontal'];
+  const p = node.load || {};
+  const ok = result ? result.ok : null;
+  const borderColor = ok === false ? '#c00' : ok ? '#4caf50' : '#999';
+  const bgColor = ok === false ? '#fff5f5' : '#fff';
+  const inX = dir.inPort === 'left' ? x : x + w / 2;
+  const inY = dir.inPort === 'left' ? y + h / 2 : y;
+  const sizeStr = result ? `${result.size}${result.parallel > 1 ? '×' + result.parallel : ''}` : '';
+  const isMotor = p.circuitType === '電動機';
+  return (
+    <g style={{ cursor: mode === 'edit' ? 'grab' : 'pointer' }}
+       onMouseDown={mode === 'edit' ? onMouseDown : undefined}
+       onClick={onClick}>
+      <rect x={x} y={y} width={w} height={h} rx={4} fill={bgColor} stroke={borderColor} strokeWidth={1.5} />
+      {selected && <rect x={x - 2} y={y - 2} width={w + 4} height={h + 4} rx={6} fill="none" stroke="#1976d2" strokeWidth={2} strokeDasharray="4 2" />}
+      {/* MCCB シンボル */}
+      <SvgMCCB x={x + 18} y={y + h / 2} />
+      {result && <text x={x + 36} y={y + h / 2 - 4} fontSize={8} fill="#333">{result.mccbAT}AT</text>}
+      <text x={x + 36} y={y + h / 2 + 7} fontSize={7} fill="#888">{p.cableType} {sizeStr} {p.cableLength}m</text>
+      {/* 負荷シンボル (右端) */}
+      {isMotor
+        ? <SvgMotor x={x + w - 18} y={y + h / 2} r={10} />
+        : <SvgLoad x={x + w - 18} y={y + h / 2} r={10} />
+      }
+      {/* 名称 */}
+      <text x={x + w / 2} y={y - 5} fontSize={9} textAnchor="middle" fontWeight={600} fill="#333">{p.loadName || p.trunkName || '負荷'}</text>
+      {/* 電流 */}
+      {result && (
+        <text x={x + w / 2} y={y + h + 11} fontSize={7} textAnchor="middle" fill="#666">
+          {rd(result.dI, 1)}A  e={result.vdPercent}%
+        </text>
+      )}
+      {/* 判定バッジ */}
+      {ok != null && (
+        <g>
+          <rect x={x + w - 22} y={y + 3} width={18} height={12} rx={2} fill={ok ? '#e8f5e9' : '#ffebee'} stroke={ok ? '#4caf50' : '#c00'} strokeWidth={0.8} />
+          <text x={x + w - 13} y={y + 12} fontSize={7} textAnchor="middle" fontWeight={700} fill={ok ? '#2e7d32' : '#c00'}>{ok ? 'OK' : 'NG'}</text>
+        </g>
+      )}
+      {mode === 'edit' && (
+        <SvgPort x={inX} y={inY} type="in" onMouseDown={e => { e.stopPropagation(); onPortMouseDown && onPortMouseDown(node.id, 'in', e); }} />
+      )}
+    </g>
+  );
+}
+
+/* === DIAGRAM: CANVAS COMPONENT (M2-4-1, M2-4-5, M2-4-6) === */
+
+function DiagramCanvas({ nodes, allResults, systemMeta, selectedId, onSelectNode, mode, onNodesChange }) {
+  const direction = (systemMeta && systemMeta.diagramDirection) || 'horizontal';
+  const svgRef = React.useRef(null);
+  const [vt, setVt] = React.useState({ x: 0, y: 0, scale: 1 });
+  const [dragging, setDragging] = React.useState(null);     /* { nodeId, offX, offY } */
+  const [panning, setPanning] = React.useState(null);         /* { startX, startY, vtX, vtY } */
+  const [wiring, setWiring] = React.useState(null);           /* { fromId, fromPort, mx, my } */
+
+  /* ズーム */
+  const handleWheel = React.useCallback((e) => {
+    e.preventDefault();
+    const factor = e.deltaY < 0 ? 1.1 : 1 / 1.1;
+    setVt(prev => {
+      const rect = svgRef.current.getBoundingClientRect();
+      const cx = e.clientX - rect.left;
+      const cy = e.clientY - rect.top;
+      const newScale = Math.min(Math.max(prev.scale * factor, 0.1), 5);
+      return {
+        scale: newScale,
+        x: cx - (cx - prev.x) * (newScale / prev.scale),
+        y: cy - (cy - prev.y) * (newScale / prev.scale)
+      };
+    });
+  }, []);
+
+  /* パン開始（背景クリック） */
+  const handleBgMouseDown = (e) => {
+    if (e.button !== 0) return;
+    if (e.target === svgRef.current || e.target.tagName === 'svg') {
+      setPanning({ startX: e.clientX, startY: e.clientY, vtX: vt.x, vtY: vt.y });
+    }
+  };
+
+  /* パン / ドラッグ / ワイヤリング のマウス移動 */
+  React.useEffect(() => {
+    const handleMove = (e) => {
+      if (panning) {
+        setVt({ ...vt, x: panning.vtX + (e.clientX - panning.startX), y: panning.vtY + (e.clientY - panning.startY), scale: vt.scale });
+      }
+      if (dragging && mode === 'edit') {
+        const rect = svgRef.current.getBoundingClientRect();
+        const sx = (e.clientX - rect.left - vt.x) / vt.scale;
+        const sy = (e.clientY - rect.top - vt.y) / vt.scale;
+        const newX = sx - dragging.offX;
+        const newY = sy - dragging.offY;
+        onNodesChange && onNodesChange(prev =>
+          prev.map(n => n.id === dragging.nodeId
+            ? { ...n, canvas: { ...n.canvas, x: newX, y: newY } }
+            : n
+          )
+        );
+      }
+      if (wiring) {
+        const rect = svgRef.current.getBoundingClientRect();
+        setWiring(prev => ({
+          ...prev,
+          mx: (e.clientX - rect.left - vt.x) / vt.scale,
+          my: (e.clientY - rect.top - vt.y) / vt.scale
+        }));
+      }
+    };
+    const handleUp = (e) => {
+      if (wiring && mode === 'edit') {
+        /* 接続先ポートの検出 */
+        const rect = svgRef.current.getBoundingClientRect();
+        const sx = (e.clientX - rect.left - vt.x) / vt.scale;
+        const sy = (e.clientY - rect.top - vt.y) / vt.scale;
+        const target = nodes.find(n => {
+          if (n.id === wiring.fromId) return false;
+          const c = n.canvas;
+          if (!c) return false;
+          const dir = DIRECTIONS[direction];
+          let px, py;
+          if (dir.inPort === 'left') { px = c.x; py = c.y + c.height / 2; }
+          else { px = c.x + c.width / 2; py = c.y; }
+          return Math.abs(sx - px) < 15 && Math.abs(sy - py) < 15;
+        });
+        if (target && wiring.fromPort === 'out') {
+          /* 接続: target の parentId を fromId に設定 */
+          const testNodes = nodes.map(n => n.id === target.id ? { ...n, parentId: wiring.fromId } : n);
+          const err = validateNode(testNodes, { ...target, parentId: wiring.fromId });
+          if (!err) {
+            onNodesChange && onNodesChange(prev =>
+              prev.map(n => n.id === target.id ? { ...n, parentId: wiring.fromId } : n)
+            );
+          }
+        }
+        setWiring(null);
+      }
+      setPanning(null);
+      setDragging(null);
+    };
+    window.addEventListener('mousemove', handleMove);
+    window.addEventListener('mouseup', handleUp);
+    return () => { window.removeEventListener('mousemove', handleMove); window.removeEventListener('mouseup', handleUp); };
+  }, [panning, dragging, wiring, vt, nodes, mode, direction]);
+
+  /* ノードドラッグ開始 */
+  const handleNodeMouseDown = (nodeId, e) => {
+    if (mode !== 'edit') return;
+    e.stopPropagation();
+    const node = nodes.find(n => n.id === nodeId);
+    if (!node || !node.canvas) return;
+    const rect = svgRef.current.getBoundingClientRect();
+    const sx = (e.clientX - rect.left - vt.x) / vt.scale;
+    const sy = (e.clientY - rect.top - vt.y) / vt.scale;
+    setDragging({ nodeId, offX: sx - node.canvas.x, offY: sy - node.canvas.y });
+  };
+
+  /* ポートドラッグ開始（ワイヤリング） */
+  const handlePortMouseDown = (nodeId, portType, e) => {
+    if (mode !== 'edit') return;
+    const node = nodes.find(n => n.id === nodeId);
+    if (!node || !node.canvas) return;
+    const rect = svgRef.current.getBoundingClientRect();
+    setWiring({
+      fromId: nodeId, fromPort: portType,
+      mx: (e.clientX - rect.left - vt.x) / vt.scale,
+      my: (e.clientY - rect.top - vt.y) / vt.scale
+    });
+  };
+
+  /* ノードクリック */
+  const handleNodeClick = (node) => {
+    onSelectNode && onSelectNode(node);
+  };
+
+  /* Fit to view */
+  const fitView = () => {
+    if (!svgRef.current || nodes.length === 0) return;
+    let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
+    for (const n of nodes) {
+      if (!n.canvas) continue;
+      minX = Math.min(minX, n.canvas.x);
+      minY = Math.min(minY, n.canvas.y);
+      maxX = Math.max(maxX, n.canvas.x + n.canvas.width);
+      maxY = Math.max(maxY, n.canvas.y + n.canvas.height);
+    }
+    if (minX === Infinity) return;
+    const rect = svgRef.current.getBoundingClientRect();
+    const pad = 40;
+    const cw = maxX - minX + pad * 2;
+    const ch = maxY - minY + pad * 2;
+    const scale = Math.min(rect.width / cw, rect.height / ch, 2);
+    setVt({
+      scale,
+      x: (rect.width - cw * scale) / 2 - (minX - pad) * scale,
+      y: (rect.height - ch * scale) / 2 - (minY - pad) * scale
+    });
+  };
+
+  /* 接続線の描画 */
+  const renderConnections = () => {
+    const lines = [];
+    for (const node of nodes) {
+      if (!node.parentId || !node.canvas) continue;
+      const parent = nodes.find(n => n.id === node.parentId);
+      if (!parent || !parent.canvas) continue;
+      const r = allResults[node.id];
+      lines.push(
+        <ConnectionLine key={`conn-${node.id}`}
+          fromCanvas={parent.canvas} toCanvas={node.canvas}
+          direction={direction} ok={r ? r.ok : null}
+          selected={selectedId === node.id || selectedId === parent.id}
+        />
+      );
+    }
+    return lines;
+  };
+
+  /* モジュール描画 */
+  const renderModules = () => {
+    return nodes.filter(n => n.canvas).map(node => {
+      const r = allResults[node.id];
+      const sel = selectedId === node.id;
+      const common = {
+        node, result: r, canvas: node.canvas, selected: sel, mode, direction,
+        onMouseDown: (e) => handleNodeMouseDown(node.id, e),
+        onClick: () => handleNodeClick(node),
+        onPortMouseDown: handlePortMouseDown
+      };
+      switch (node.type) {
+        case 'transformer': return <ModuleTransformer key={node.id} {...common} />;
+        case 'trunk': return <ModuleTrunk key={node.id} {...common} />;
+        case 'load': return <ModuleLoadNode key={node.id} {...common} />;
+        default: return null;
+      }
+    });
+  };
+
+  /* ワイヤリング中の仮線 */
+  const renderWiringLine = () => {
+    if (!wiring) return null;
+    const from = nodes.find(n => n.id === wiring.fromId);
+    if (!from || !from.canvas) return null;
+    const dir = DIRECTIONS[direction];
+    let fx, fy;
+    if (wiring.fromPort === 'out') {
+      fx = dir.outPort === 'right' ? from.canvas.x + from.canvas.width : from.canvas.x + from.canvas.width / 2;
+      fy = dir.outPort === 'right' ? from.canvas.y + from.canvas.height / 2 : from.canvas.y + from.canvas.height;
+    } else {
+      fx = dir.inPort === 'left' ? from.canvas.x : from.canvas.x + from.canvas.width / 2;
+      fy = dir.inPort === 'left' ? from.canvas.y + from.canvas.height / 2 : from.canvas.y;
+    }
+    return <line x1={fx} y1={fy} x2={wiring.mx} y2={wiring.my} stroke="#1976d2" strokeWidth={2} strokeDasharray="4 2" />;
+  };
+
+  return (
+    <div style={{ width: '100%', height: '100%', position: 'relative', background: '#f8f9fa', overflow: 'hidden' }}>
+      <svg ref={svgRef} width="100%" height="100%"
+        style={{ cursor: panning ? 'grabbing' : 'grab' }}
+        onWheel={handleWheel}
+        onMouseDown={handleBgMouseDown}
+      >
+        {/* グリッド（編集モード） */}
+        {mode === 'edit' && (
+          <defs>
+            <pattern id="grid" width={20 * vt.scale} height={20 * vt.scale} patternUnits="userSpaceOnUse"
+              x={vt.x % (20 * vt.scale)} y={vt.y % (20 * vt.scale)}>
+              <path d={`M ${20 * vt.scale} 0 L 0 0 0 ${20 * vt.scale}`} fill="none" stroke="#e0e0e0" strokeWidth={0.5} />
+            </pattern>
+            <rect width="100%" height="100%" fill="url(#grid)" />
+          </defs>
+        )}
+        <g transform={`translate(${vt.x},${vt.y}) scale(${vt.scale})`}>
+          {renderConnections()}
+          {renderModules()}
+          {renderWiringLine()}
+        </g>
+      </svg>
+      {/* ズーム/フィット コントロール */}
+      <div style={{ position: 'absolute', bottom: 8, right: 8, display: 'flex', gap: 4 }}>
+        <button onClick={() => setVt(v => ({ ...v, scale: v.scale * 1.2 }))}
+          style={{ padding: '4px 8px', borderRadius: 4, border: '1px solid #ccc', background: '#fff', cursor: 'pointer', fontSize: 14 }}>+</button>
+        <button onClick={() => setVt(v => ({ ...v, scale: v.scale / 1.2 }))}
+          style={{ padding: '4px 8px', borderRadius: 4, border: '1px solid #ccc', background: '#fff', cursor: 'pointer', fontSize: 14 }}>−</button>
+        <button onClick={fitView}
+          style={{ padding: '4px 8px', borderRadius: 4, border: '1px solid #ccc', background: '#fff', cursor: 'pointer', fontSize: 11 }}>Fit</button>
+      </div>
+      {/* モード表示 */}
+      <div style={{ position: 'absolute', top: 8, left: 8, fontSize: 11, color: '#666', background: 'rgba(255,255,255,0.8)', padding: '2px 8px', borderRadius: 4 }}>
+        {mode === 'edit' ? '編集モード' : 'ビューモード'}
+      </div>
+    </div>
+  );
 }
 
 /* === COMPONENTS === */
@@ -1626,6 +2219,178 @@ ${tbodyHtml}
 /** HTML エスケープ */
 function esc(s) { return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;'); }
 
+/* === DIAGRAM OUTPUT (M2-5) === */
+
+/**
+ * genDiagramHTML — 系統図を印刷用 HTML/SVG として生成
+ */
+function genDiagramHTML(nodes, allResults, systemMeta) {
+  const direction = (systemMeta && systemMeta.diagramDirection) || 'horizontal';
+  /* canvas 座標を確定 */
+  const positioned = ensureCanvasPositions(nodes, direction);
+
+  /* SVG バウンディングボックスを計算 */
+  let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
+  for (const n of positioned) {
+    if (!n.canvas) continue;
+    minX = Math.min(minX, n.canvas.x);
+    minY = Math.min(minY, n.canvas.y);
+    maxX = Math.max(maxX, n.canvas.x + n.canvas.width);
+    maxY = Math.max(maxY, n.canvas.y + n.canvas.height);
+  }
+  const pad = 60;
+  minX -= pad; minY -= pad; maxX += pad; maxY += pad;
+  const svgW = maxX - minX;
+  const svgH = maxY - minY;
+
+  /* 接続線 SVG */
+  const dir = DIRECTIONS[direction];
+  let connSvg = '';
+  for (const n of positioned) {
+    if (!n.parentId || !n.canvas) continue;
+    const parent = positioned.find(p => p.id === n.parentId);
+    if (!parent || !parent.canvas) continue;
+    let fx, fy, tx, ty;
+    if (dir.outPort === 'right') {
+      fx = parent.canvas.x + parent.canvas.width; fy = parent.canvas.y + parent.canvas.height / 2;
+      tx = n.canvas.x; ty = n.canvas.y + n.canvas.height / 2;
+    } else {
+      fx = parent.canvas.x + parent.canvas.width / 2; fy = parent.canvas.y + parent.canvas.height;
+      tx = n.canvas.x + n.canvas.width / 2; ty = n.canvas.y;
+    }
+    const mx = (fx + tx) / 2, my = (fy + ty) / 2;
+    const r = allResults[n.id];
+    const col = r ? (r.ok ? '#333' : '#c00') : '#999';
+    const dash = r && !r.ok ? 'stroke-dasharray="4 2"' : '';
+    const d = dir.outPort === 'right'
+      ? `M${fx},${fy} C${mx},${fy} ${mx},${ty} ${tx},${ty}`
+      : `M${fx},${fy} C${fx},${my} ${tx},${my} ${tx},${ty}`;
+    connSvg += `<path d="${d}" fill="none" stroke="${col}" stroke-width="1.5" ${dash}/>\n`;
+  }
+
+  /* モジュール SVG */
+  let modSvg = '';
+  for (const n of positioned) {
+    if (!n.canvas) continue;
+    const { x, y, width: w, height: h } = n.canvas;
+    const r = allResults[n.id];
+
+    if (n.type === 'transformer') {
+      const tr = n.transformer || {};
+      const rad = Math.min(w, h) * 0.22;
+      const cx = x + w / 2, cy = y + h / 2;
+      const [pri, sec] = (tr.connection || 'Δ-Y').split('-');
+      modSvg += `<rect x="${x}" y="${y}" width="${w}" height="${h}" rx="4" fill="#f3e5f5" stroke="#7b1fa2" stroke-width="1.5"/>`;
+      modSvg += `<circle cx="${cx - rad * 0.5}" cy="${cy}" r="${rad}" fill="none" stroke="#333" stroke-width="1.5"/>`;
+      modSvg += `<circle cx="${cx + rad * 0.5}" cy="${cy}" r="${rad}" fill="none" stroke="#333" stroke-width="1.5"/>`;
+      modSvg += `<text x="${cx - rad * 0.5}" y="${cy - rad - 4}" font-size="9" text-anchor="middle" fill="#555">${esc(pri)}</text>`;
+      modSvg += `<text x="${cx + rad * 0.5}" y="${cy - rad - 4}" font-size="9" text-anchor="middle" fill="#555">${esc(sec)}</text>`;
+      modSvg += `<text x="${cx}" y="${y - 6}" font-size="10" text-anchor="middle" font-weight="700" fill="#333">${esc(tr.name || 'TR')}</text>`;
+      modSvg += `<text x="${cx}" y="${y + h + 12}" font-size="8" text-anchor="middle" fill="#666">${esc(String(tr.capacity_kVA || ''))}kVA ${esc(String(tr.primaryV || ''))}/${esc(String(tr.secondaryV || ''))}V</text>`;
+      if (r) modSvg += `<text x="${cx}" y="${y + h + 22}" font-size="8" text-anchor="middle" fill="#666">Isc₃=${rd(r.Isc3 / 1000, 1)}kA  %Z=${tr.pctZ}</text>`;
+
+    } else if (n.type === 'trunk') {
+      const tr = n.trunk || {};
+      const ok = r ? r.ok : null;
+      const border = ok === false ? '#c00' : ok ? '#4caf50' : '#999';
+      const bg = ok === false ? '#fff5f5' : '#fff';
+      const sizeStr = r ? `${r.size}${r.parallel > 1 ? '×' + r.parallel : ''}` : '';
+      modSvg += `<rect x="${x}" y="${y}" width="${w}" height="${h}" rx="4" fill="${bg}" stroke="${border}" stroke-width="1.5"/>`;
+      /* MCCB */
+      const mx = x + 18, my = y + h / 2, mw = 20, mh = 14;
+      modSvg += `<rect x="${mx - mw / 2}" y="${my - mh / 2}" width="${mw}" height="${mh}" fill="#fff" stroke="#333" stroke-width="1.2"/>`;
+      modSvg += `<line x1="${mx - mw / 4}" y1="${my - mh / 2}" x2="${mx + mw / 4}" y2="${my + mh / 2}" stroke="#333" stroke-width="1.2"/>`;
+      if (r) modSvg += `<text x="${x + 36}" y="${my - 6}" font-size="8" fill="#333">${r.mccbAT}AT</text>`;
+      modSvg += `<text x="${x + 36}" y="${my + 5}" font-size="8" fill="#555">${esc(tr.cableType)} ${sizeStr}</text>`;
+      modSvg += `<text x="${x + 36}" y="${my + 15}" font-size="7" fill="#888">${tr.cableLength}m</text>`;
+      modSvg += `<text x="${x + w / 2}" y="${y - 5}" font-size="10" text-anchor="middle" font-weight="600" fill="#333">${esc(tr.name || '幹線')}</text>`;
+      if (r) modSvg += `<text x="${x + w - 6}" y="${my + 3}" font-size="8" text-anchor="end" fill="#666">${rd(r.dI, 1)}A  e=${r.vdPercent}%</text>`;
+      if (ok != null) {
+        modSvg += `<rect x="${x + w - 22}" y="${y + 3}" width="18" height="12" rx="2" fill="${ok ? '#e8f5e9' : '#ffebee'}" stroke="${ok ? '#4caf50' : '#c00'}" stroke-width="0.8"/>`;
+        modSvg += `<text x="${x + w - 13}" y="${y + 12}" font-size="7" text-anchor="middle" font-weight="700" fill="${ok ? '#2e7d32' : '#c00'}">${ok ? 'OK' : 'NG'}</text>`;
+      }
+
+    } else if (n.type === 'load') {
+      const p = n.load || {};
+      const ok = r ? r.ok : null;
+      const border = ok === false ? '#c00' : ok ? '#4caf50' : '#999';
+      const bg = ok === false ? '#fff5f5' : '#fff';
+      const sizeStr = r ? `${r.size}${r.parallel > 1 ? '×' + r.parallel : ''}` : '';
+      modSvg += `<rect x="${x}" y="${y}" width="${w}" height="${h}" rx="4" fill="${bg}" stroke="${border}" stroke-width="1.5"/>`;
+      /* MCCB */
+      const mx = x + 18, my = y + h / 2, mw = 20, mh = 14;
+      modSvg += `<rect x="${mx - mw / 2}" y="${my - mh / 2}" width="${mw}" height="${mh}" fill="#fff" stroke="#333" stroke-width="1.2"/>`;
+      modSvg += `<line x1="${mx - mw / 4}" y1="${my - mh / 2}" x2="${mx + mw / 4}" y2="${my + mh / 2}" stroke="#333" stroke-width="1.2"/>`;
+      if (r) modSvg += `<text x="${x + 36}" y="${my - 4}" font-size="8" fill="#333">${r.mccbAT}AT</text>`;
+      modSvg += `<text x="${x + 36}" y="${my + 7}" font-size="7" fill="#888">${esc(p.cableType)} ${sizeStr} ${p.cableLength}m</text>`;
+      /* 負荷シンボル */
+      if (p.circuitType === '電動機') {
+        modSvg += `<circle cx="${x + w - 18}" cy="${my}" r="10" fill="#e3f2fd" stroke="#1565c0" stroke-width="1.5"/>`;
+        modSvg += `<text x="${x + w - 18}" y="${my + 4}" font-size="10" text-anchor="middle" font-weight="700" fill="#1565c0">M</text>`;
+      } else {
+        modSvg += `<polygon points="${x + w - 18},${my - 10} ${x + w - 8},${my + 6} ${x + w - 28},${my + 6}" fill="#fff3e0" stroke="#e65100" stroke-width="1.5"/>`;
+      }
+      modSvg += `<text x="${x + w / 2}" y="${y - 5}" font-size="9" text-anchor="middle" font-weight="600" fill="#333">${esc(p.loadName || p.trunkName || '負荷')}</text>`;
+      if (r) modSvg += `<text x="${x + w / 2}" y="${y + h + 11}" font-size="7" text-anchor="middle" fill="#666">${rd(r.dI, 1)}A  e=${r.vdPercent}%</text>`;
+      if (ok != null) {
+        modSvg += `<rect x="${x + w - 22}" y="${y + 3}" width="18" height="12" rx="2" fill="${ok ? '#e8f5e9' : '#ffebee'}" stroke="${ok ? '#4caf50' : '#c00'}" stroke-width="0.8"/>`;
+        modSvg += `<text x="${x + w - 13}" y="${y + 12}" font-size="7" text-anchor="middle" font-weight="700" fill="${ok ? '#2e7d32' : '#c00'}">${ok ? 'OK' : 'NG'}</text>`;
+      }
+    }
+  }
+
+  /* 標題欄 */
+  const titleX = maxX - 200, titleY = maxY - 60;
+  const titleSvg = `
+    <rect x="${titleX}" y="${titleY}" width="180" height="50" fill="#fff" stroke="#333" stroke-width="1"/>
+    <text x="${titleX + 90}" y="${titleY + 14}" font-size="11" text-anchor="middle" font-weight="700" fill="#333">幹線系統図</text>
+    <line x1="${titleX}" y1="${titleY + 18}" x2="${titleX + 180}" y2="${titleY + 18}" stroke="#333" stroke-width="0.5"/>
+    <text x="${titleX + 6}" y="${titleY + 30}" font-size="7" fill="#666">工事名称: ${esc(systemMeta.projectName || '')}</text>
+    <text x="${titleX + 6}" y="${titleY + 40}" font-size="7" fill="#666">作成日: ${new Date().toLocaleDateString('ja-JP')}</text>
+  `;
+
+  /* 凡例 */
+  const legX = minX + 10, legY = maxY - 80;
+  const legendSvg = `
+    <rect x="${legX}" y="${legY}" width="160" height="70" fill="#fff" stroke="#999" stroke-width="0.5" rx="2"/>
+    <text x="${legX + 6}" y="${legY + 12}" font-size="8" font-weight="700" fill="#333">凡例</text>
+    <rect x="${legX + 6}" y="${legY + 18}" width="14" height="10" fill="#fff" stroke="#333" stroke-width="1"/>
+    <line x1="${legX + 9}" y1="${legY + 18}" x2="${legX + 17}" y2="${legY + 28}" stroke="#333" stroke-width="1"/>
+    <text x="${legX + 26}" y="${legY + 27}" font-size="7" fill="#333">MCCB（配線用遮断器）</text>
+    <circle cx="${legX + 13}" cy="${legY + 38}" r="6" fill="none" stroke="#333" stroke-width="1"/>
+    <circle cx="${legX + 19}" cy="${legY + 38}" r="6" fill="none" stroke="#333" stroke-width="1"/>
+    <text x="${legX + 32}" y="${legY + 41}" font-size="7" fill="#333">変圧器</text>
+    <circle cx="${legX + 13}" cy="${legY + 54}" r="6" fill="#e3f2fd" stroke="#1565c0" stroke-width="1"/>
+    <text x="${legX + 13}" y="${legY + 57}" font-size="6" text-anchor="middle" font-weight="700" fill="#1565c0">M</text>
+    <text x="${legX + 26}" y="${legY + 57}" font-size="7" fill="#333">電動機</text>
+    <polygon points="${legX + 90},${legY + 20} ${legX + 98},${legY + 30} ${legX + 82},${legY + 30}" fill="#fff3e0" stroke="#e65100" stroke-width="1"/>
+    <text x="${legX + 104}" y="${legY + 27}" font-size="7" fill="#333">一般負荷</text>
+  `;
+
+  return `<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="UTF-8">
+<title>幹線系統図</title>
+<style>
+@page { size: A3 landscape; margin: 10mm; }
+* { box-sizing: border-box; margin: 0; padding: 0; }
+body { font-family: 'MS Gothic', 'Hiragino Kaku Gothic ProN', monospace; }
+svg { width: 100%; height: auto; }
+@media print { body { -webkit-print-color-adjust: exact; print-color-adjust: exact; } }
+</style>
+</head>
+<body>
+<svg viewBox="${minX} ${minY} ${svgW} ${svgH}" xmlns="http://www.w3.org/2000/svg">
+${connSvg}
+${modSvg}
+${titleSvg}
+${legendSvg}
+</svg>
+</body>
+</html>`;
+}
+
 /* === APP === */
 function App() {
   /* --- State: live（表示用）と calc（計算用）の2層管理 (§6) --- */
@@ -1648,6 +2413,14 @@ function App() {
   const [trunkParams, setTrunkParams] = React.useState({ ...DEFAULT_TRUNK_PARAMS });
   const fileInputRef = React.useRef(null);
 
+  /* --- M2: 系統図ステート --- */
+  const [systemMeta, setSystemMeta] = React.useState({
+    projectName: '', hvVoltage: 6600, freq: '60Hz',
+    substationName: '受電設備', diagramDirection: 'horizontal'
+  });
+  const [rightPaneView, setRightPaneView] = React.useState('table'); /* 'table' | 'diagram' | 'split' */
+  const [diagramMode, setDiagramMode] = React.useState('edit'); /* 'edit' | 'view' */
+
   /* --- 計算結果（フォームプレビュー用） --- */
   const result = React.useMemo(() => {
     if (editMode !== 'load' || params.capacity <= 0) return null;
@@ -1659,6 +2432,15 @@ function App() {
     if (nodes.length === 0) return {};
     return calculateAll(nodes);
   }, [nodes]);
+
+  /* --- M2: canvas 座標が未設定のノードに自動配置を適用 --- */
+  React.useEffect(() => {
+    if (nodes.length === 0) return;
+    const needsLayout = nodes.some(n => !n.canvas || n.canvas.x == null);
+    if (!needsLayout) return;
+    const updated = ensureCanvasPositions(nodes, systemMeta.diagramDirection);
+    if (updated !== nodes) setNodes(updated);
+  }, [nodes.length]);
 
   /* --- 選択中ノードの情報 --- */
   const selectedNode = nodes.find(n => n.id === selectedId);
@@ -1745,6 +2527,7 @@ function App() {
           id: genId(), type: 'trunk', parentId: trId,
           order: getChildren(updated, trId).length,
           ts: new Date().toISOString(), externalRef: null,
+          canvas: null,
           trunk: {
             ...DEFAULT_TRUNK_PARAMS, name: params.trunkName,
             system: params.system, voltage: params.voltage,
@@ -1757,6 +2540,7 @@ function App() {
         id: genId(), type: 'load', parentId: trunk.id,
         order: getChildren(updated, trunk.id).length,
         ts: new Date().toISOString(), externalRef: null,
+        canvas: null,
         load: { ...params }
       };
       updated = addNode(updated, loadNode);
@@ -1812,11 +2596,15 @@ function App() {
     if (selectedId && selectedNode?.type === 'transformer') {
       handleUpdateNode();
     } else {
-      setNodes(prev => addNode(prev, {
-        id: genId(), type: 'transformer', parentId: null,
-        order: 0, ts: new Date().toISOString(), externalRef: null,
-        transformer: { ...trParams }
-      }));
+      setNodes(prev => {
+        const trCount = prev.filter(n => n.type === 'transformer').length;
+        return addNode(prev, {
+          id: genId(), type: 'transformer', parentId: null,
+          order: trCount, ts: new Date().toISOString(), externalRef: null,
+          transformer: { ...trParams },
+          canvas: null /* 自動配置で割り当て */
+        });
+      });
       resetToNewLoad();
     }
   };
@@ -1870,9 +2658,9 @@ function App() {
     }
   };
 
-  /* --- Export (§14) --- */
+  /* --- Export (§14, M2-1-4: スキーマ拡張) --- */
   const handleExport = () => {
-    const data = { version: 'P5', nodes, exportedAt: new Date().toISOString() };
+    const data = { version: 'M2', nodes, systemMeta, exportedAt: new Date().toISOString() };
     const json = JSON.stringify(data, null, 2);
     const blob = new Blob([json], { type: 'application/json' });
     const url = URL.createObjectURL(blob);
@@ -1897,11 +2685,14 @@ function App() {
           const imported = data.nodes.map(n => {
             let newId = n.id;
             if (existingIds.has(n.id)) { newId = genId(); idMap[n.id] = newId; }
-            return { ...n, id: newId };
+            /* P5 形式は canvas フィールドがないため null で補完 */
+            return { ...n, id: newId, canvas: n.canvas || null };
           }).map(n => ({
             ...n, parentId: n.parentId ? (idMap[n.parentId] || n.parentId) : null
           }));
           setNodes(prev => [...prev, ...imported]);
+          /* M2: systemMeta の復元 */
+          if (data.systemMeta) setSystemMeta(prev => ({ ...prev, ...data.systemMeta }));
           alert(`${imported.length} ノードをインポートしました`);
         } else if (data.records && Array.isArray(data.records)) {
           alert('旧形式（P3）のファイルです。P4 以降の形式でエクスポートし直してください。');
@@ -1920,6 +2711,14 @@ function App() {
     else { alert('ポップアップがブロックされました。ブラウザの設定を確認してください。'); }
   };
 
+  /* --- M2-5: 系統図出力 --- */
+  const handleDiagramOutput = () => {
+    const html = genDiagramHTML(nodes, allResults, systemMeta);
+    const w = window.open('', '_blank');
+    if (w) { w.document.write(html); w.document.close(); }
+    else { alert('ポップアップがブロックされました。ブラウザの設定を確認してください。'); }
+  };
+
   /* --- レンダリング --- */
   const isMotor = params.circuitType === '電動機';
   const isCustomReduction = params.reductionPreset === 'カスタム';
@@ -1933,7 +2732,6 @@ function App() {
   const tempFactor = getTempFactor(params.wiringMethod, params.ambientTemp);
 
   const isEditing = selectedId != null;
-  const hasTr = nodes.some(n => n.type === 'transformer');
   const canRegister = editMode === 'load' && result && params.trunkName && params.capacity > 0 && params.cableLength > 0;
 
   return (
@@ -1962,6 +2760,12 @@ function App() {
             cursor: nodes.length ? 'pointer' : 'not-allowed',
             opacity: nodes.length ? 1 : 0.5, fontSize: 13
           }}>PDF出力</button>
+          <button onClick={handleDiagramOutput} disabled={nodes.length === 0} style={{
+            padding: '4px 12px', borderRadius: 4, border: '1px solid rgba(255,255,255,0.7)',
+            background: 'transparent', color: '#fff',
+            cursor: nodes.length ? 'pointer' : 'not-allowed',
+            opacity: nodes.length ? 1 : 0.5, fontSize: 13
+          }}>系統図</button>
         </div>
       </header>
 
@@ -1974,17 +2778,15 @@ function App() {
           background: '#fff', borderRight: '1px solid #ddd', padding: 16
         }}>
 
-          {/* モード切替タブ */}
+          {/* モード切替タブ (M2-1: 複数変圧器サポート) */}
           <div style={{ display: 'flex', gap: 4, marginBottom: 12, flexWrap: 'wrap' }}>
-            {!hasTr && (
-              <button onClick={() => { setEditMode('transformer'); setSelectedId(null); setTrParams({ ...DEFAULT_TR_PARAMS }); }}
-                style={{
-                  padding: '6px 12px', borderRadius: 4,
-                  border: editMode === 'transformer' ? '2px solid #1976d2' : '1px solid #ccc',
-                  background: editMode === 'transformer' ? '#e3f2fd' : '#fff',
-                  cursor: 'pointer', fontSize: 12, fontWeight: 600
-                }}>+ 変圧器</button>
-            )}
+            <button onClick={() => { setEditMode('transformer'); setSelectedId(null); setTrParams({ ...DEFAULT_TR_PARAMS }); }}
+              style={{
+                padding: '6px 12px', borderRadius: 4,
+                border: editMode === 'transformer' ? '2px solid #1976d2' : '1px solid #ccc',
+                background: editMode === 'transformer' ? '#e3f2fd' : '#fff',
+                cursor: 'pointer', fontSize: 12, fontWeight: 600
+              }}>+ 変圧器</button>
             <button onClick={resetToNewLoad}
               style={{
                 padding: '6px 12px', borderRadius: 4,
@@ -2161,37 +2963,94 @@ function App() {
           )}
         </div>
 
-        {/* 右ペイン: 選定結果 + 登録一覧 */}
-        <div style={{ flex: 1, overflowY: 'auto', padding: 16, background: '#fafafa' }}>
-          {/* 結果パネル（モード別） */}
-          {editMode === 'transformer' && (
-            <TransformerResultPanel
-              result={isEditing ? selectedResult : trPreview}
-              nodes={nodes} nodeId={selectedId} allResults={allResults}
-            />
-          )}
-          {editMode === 'trunk' && selectedResult && (
-            <ResultPanel result={selectedResult} params={selectedNode?.trunk || trunkParams} />
-          )}
-          {editMode === 'load' && (
-            <ResultPanel result={isEditing ? selectedResult : result} params={params} />
+        {/* 右ペイン: 選定結果 + 登録一覧 / 系統図 */}
+        <div style={{ flex: 1, display: 'flex', flexDirection: 'column', overflow: 'hidden', background: '#fafafa' }}>
+
+          {/* M2: ビュー切替タブ */}
+          <div style={{ display: 'flex', gap: 0, padding: '8px 16px 0', background: '#fafafa', borderBottom: '1px solid #e0e0e0', flexShrink: 0 }}>
+            {[
+              { key: 'table', label: 'テーブル' },
+              { key: 'diagram', label: '系統図' },
+              { key: 'split', label: '分割' }
+            ].map(tab => (
+              <button key={tab.key} onClick={() => setRightPaneView(tab.key)}
+                style={{
+                  padding: '6px 16px', fontSize: 12, fontWeight: rightPaneView === tab.key ? 700 : 400,
+                  border: 'none', borderBottom: rightPaneView === tab.key ? '2px solid #1976d2' : '2px solid transparent',
+                  background: 'transparent', color: rightPaneView === tab.key ? '#1976d2' : '#666',
+                  cursor: 'pointer'
+                }}>{tab.label}</button>
+            ))}
+            {/* 系統図表示時: 編集/ビューモード切替 */}
+            {(rightPaneView === 'diagram' || rightPaneView === 'split') && (
+              <div style={{ marginLeft: 'auto', display: 'flex', gap: 4, alignItems: 'center' }}>
+                <button onClick={() => setDiagramMode('edit')}
+                  style={{
+                    padding: '3px 10px', fontSize: 11, borderRadius: 3,
+                    border: diagramMode === 'edit' ? '1px solid #1976d2' : '1px solid #ccc',
+                    background: diagramMode === 'edit' ? '#e3f2fd' : '#fff',
+                    color: diagramMode === 'edit' ? '#1976d2' : '#666', cursor: 'pointer'
+                  }}>編集</button>
+                <button onClick={() => setDiagramMode('view')}
+                  style={{
+                    padding: '3px 10px', fontSize: 11, borderRadius: 3,
+                    border: diagramMode === 'view' ? '1px solid #1976d2' : '1px solid #ccc',
+                    background: diagramMode === 'view' ? '#e3f2fd' : '#fff',
+                    color: diagramMode === 'view' ? '#1976d2' : '#666', cursor: 'pointer'
+                  }}>ビュー</button>
+              </div>
+            )}
+          </div>
+
+          {/* テーブルビュー */}
+          {(rightPaneView === 'table' || rightPaneView === 'split') && (
+            <div style={{
+              flex: rightPaneView === 'split' ? '0 0 40%' : 1,
+              overflowY: 'auto', padding: 16
+            }}>
+              {/* 結果パネル（モード別） */}
+              {editMode === 'transformer' && (
+                <TransformerResultPanel
+                  result={isEditing ? selectedResult : trPreview}
+                  nodes={nodes} nodeId={selectedId} allResults={allResults}
+                />
+              )}
+              {editMode === 'trunk' && selectedResult && (
+                <ResultPanel result={selectedResult} params={selectedNode?.trunk || trunkParams} />
+              )}
+              {editMode === 'load' && (
+                <ResultPanel result={isEditing ? selectedResult : result} params={params} />
+              )}
+
+              {/* 登録一覧テーブル */}
+              <div style={{
+                marginTop: 24, padding: 16, background: '#fff',
+                border: '1px solid #e0e0e0', borderRadius: 8
+              }}>
+                <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 12 }}>
+                  <span style={{ fontSize: 14, fontWeight: 700, color: '#333' }}>登録一覧</span>
+                  <span style={{ fontSize: 12, color: '#999' }}>{nodes.length} ノード</span>
+                </div>
+                <TreeTable
+                  nodes={nodes} allResults={allResults} selectedId={selectedId}
+                  onSelect={handleSelectNode} onDelete={handleDeleteNode}
+                  onAddChild={handleAddChild}
+                />
+              </div>
+            </div>
           )}
 
-          {/* 登録一覧テーブル */}
-          <div style={{
-            marginTop: 24, padding: 16, background: '#fff',
-            border: '1px solid #e0e0e0', borderRadius: 8
-          }}>
-            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 12 }}>
-              <span style={{ fontSize: 14, fontWeight: 700, color: '#333' }}>登録一覧</span>
-              <span style={{ fontSize: 12, color: '#999' }}>{nodes.length} ノード</span>
+          {/* 系統図ビュー */}
+          {(rightPaneView === 'diagram' || rightPaneView === 'split') && (
+            <div style={{ flex: rightPaneView === 'split' ? '1 1 60%' : 1, borderTop: rightPaneView === 'split' ? '1px solid #e0e0e0' : 'none' }}>
+              <DiagramCanvas
+                nodes={nodes} allResults={allResults} systemMeta={systemMeta}
+                selectedId={selectedId} onSelectNode={handleSelectNode}
+                mode={diagramMode} onNodesChange={setNodes}
+              />
             </div>
-            <TreeTable
-              nodes={nodes} allResults={allResults} selectedId={selectedId}
-              onSelect={handleSelectNode} onDelete={handleDeleteNode}
-              onAddChild={handleAddChild}
-            />
-          </div>
+          )}
+
         </div>
 
       </div>
