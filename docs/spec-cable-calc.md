@@ -866,3 +866,88 @@ I²t 許容値:
 TT 系統の地絡保護条件: `RA × IΔn ≤ 50V`
 
 ELCB の感度電流・動作時間と接地抵抗の組み合わせにより保護協調を判定。ELCB テーブル参照。
+
+---
+
+## 21. 幹線グループ管理（M2-6）
+
+### 21-1. 概要
+
+複数の変圧器系統を「幹線グループ」として論理的にグルーピングし、キャンバス上でグループ単位の配置・折りたたみ/展開表示を可能にする。グループ間の任意接続（クロスリンク）を定義でき、TreeTable および系統図上で接続関係を可視化する。
+
+### 21-2. グループデータモデル
+
+```javascript
+// App ステート
+const [groups, setGroups] = useState([]);
+const [crossLinks, setCrossLinks] = useState([]);
+
+// Group スキーマ
+{
+  id: string,                    // 一意識別子
+  name: string,                  // 表示名（例: "動力盤-1"）
+  color: string,                 // アクセントカラー
+  rootNodeId: string,            // ルートノード ID（通常は transformer）
+  canvas: { x, y, collapsed }   // キャンバス配置情報
+}
+
+// CrossLink スキーマ
+{
+  id: string,
+  fromGroupId: string,           // 送り側グループ
+  toGroupId: string,             // 受け側グループ
+  fromNodeId: string | null,     // 具体的ノード（null = グループ全体）
+  toNodeId: string | null,
+  linkType: string,              // 'tie' | 'emergency' | 'backup' | 'custom'
+  label: string,                 // 表示ラベル
+  lineStyle: string,             // 'dashed' | 'dotted' | 'solid'
+  color: string                  // 線の色
+}
+```
+
+### 21-3. グループ所属の導出
+
+ノード側に `groupId` を持たない。グループの `rootNodeId` からツリー走査で所属ノードを導出する。
+
+```
+getGroupNodes(nodes, rootNodeId) → [rootNode, ...descendants]
+findGroupForNode(groups, nodes, nodeId) → group | null
+```
+
+### 21-4. 自動グループ化
+
+- 変圧器ノード追加時に自動でグループを作成
+- Import 時に旧形式（M2）からのデータにはグループを自動補完
+- 「全自動グループ化」ボタンで未分類ルートノードに一括グループ割当
+
+### 21-5. キャンバス表示
+
+| モード | 表示 |
+|--------|------|
+| 展開（`collapsed: false`） | 所属ノードのモジュールを通常表示。グループ枠（破線 + 半透明背景）で囲む |
+| 折りたたみ（`collapsed: true`） | サマリーボックス（グループ名、変圧器情報、回路数、総合判定） |
+
+クロスリンクはグループ重心間のベジェ曲線で描画。線種・色はリンク定義に従う。
+
+### 21-6. TreeTable 統合
+
+- グループヘッダ行（名前 + アクセントカラー + 回路数 + 総合判定）
+- 折りたたみ/展開ボタン
+- クロスリンクインジケータ（「← TR1 から連絡給電」等）
+- 未分類ルートノードは「未分類」セクションに表示
+
+### 21-7. グループ単位出力
+
+PDF 出力・系統図出力ボタンにドロップダウンメニューを追加:
+- 「全体（結合出力）」: 全ノードを含む出力（従来動作）
+- グループ個別選択: そのグループの所属ノードのみ出力
+
+### 21-8. Export/Import
+
+- Export バージョン: `'M2G'`
+- エクスポートデータ: `{ version, nodes, groups, crossLinks, systemMeta, exportedAt }`
+- M2 形式からのインポート時: `groups` を自動生成、`crossLinks` は空配列
+
+### 21-9. 計算エンジンへの影響
+
+**ゼロ**。`calculateAll()`, `runCalc()`, `runParentCalc()`, `calcFaultCurrents()` は一切変更しない。グループとクロスリンクは純粋なプレゼンテーション層。
