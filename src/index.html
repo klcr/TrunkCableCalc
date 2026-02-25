@@ -150,6 +150,41 @@ function removeNode(nodes, id) {
   return nodes.filter(n => !descIds.has(n.id));
 }
 
+/* --- 経路抽出ユーティリティ (M2-3-P2) --- */
+
+/** 変圧器→末端の全経路を列挙。各経路はルートからリーフまでのノードID配列 */
+function enumerateAllPaths(nodes) {
+  const paths = [];
+  const leaves = nodes.filter(n => getChildren(nodes, n.id).length === 0 && n.type !== 'transformer');
+  for (const leaf of leaves) {
+    const path = [leaf.id];
+    let cur = leaf;
+    while (cur.parentId) {
+      path.unshift(cur.parentId);
+      cur = nodes.find(n => n.id === cur.parentId);
+      if (!cur) break;
+    }
+    if (path.length >= 2) paths.push(path);
+  }
+  return paths;
+}
+
+/** 指定ノードを含む経路を取得（ルート→そのノードまで） */
+function getPathToNode(nodes, nodeId) {
+  const path = [nodeId];
+  let cur = nodes.find(n => n.id === nodeId);
+  while (cur && cur.parentId) {
+    path.unshift(cur.parentId);
+    cur = nodes.find(n => n.id === cur.parentId);
+  }
+  return path;
+}
+
+/** 指定ノードを含む末端までの全経路を列挙 */
+function getPathsThroughNode(nodes, nodeId) {
+  return enumerateAllPaths(nodes).filter(p => p.includes(nodeId));
+}
+
 /* === CALC ENGINE === */
 
 /* --- 定数・ヘルパー --- */
@@ -1735,6 +1770,282 @@ function SliderInput({ value, displayValue, onChange, onConfirm, cfg, min, max, 
             <span>{clamp((typeof value === 'number' ? value : parseFloat(value) || 0) - cfg.range)}</span>
             <span>{clamp((typeof value === 'number' ? value : parseFloat(value) || 0) + cfg.range)}</span>
           </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
+/* --- ProfileTab 短絡電流プロファイルカーブ (§20-4b, M2-3-P) --- */
+function ProfileTab({ nodes, allResults, selectedId, onSelectNode }) {
+  const [pathIdx, setPathIdx] = React.useState(0);
+  const [logScale, setLogScale] = React.useState(true);
+  const [showIw, setShowIw] = React.useState(true);
+  const [hovered, setHovered] = React.useState(null);
+
+  /* P2: 経路列挙と選択 */
+  const allPaths = React.useMemo(() => enumerateAllPaths(nodes), [nodes]);
+
+  /* selectedId が変わったら、そのノードを含む経路に自動切替 */
+  React.useEffect(() => {
+    if (!selectedId || allPaths.length === 0) return;
+    const idx = allPaths.findIndex(p => p.includes(selectedId));
+    if (idx >= 0 && idx !== pathIdx) setPathIdx(idx);
+  }, [selectedId, allPaths]);
+
+  const currentPath = allPaths[pathIdx] || [];
+  const pathNodes = currentPath.map(id => nodes.find(n => n.id === id)).filter(Boolean);
+  const pathResults = currentPath.map(id => allResults[id]).filter(Boolean);
+
+  /* 経路切替 */
+  const prevPath = () => setPathIdx(i => (i - 1 + allPaths.length) % allPaths.length);
+  const nextPath = () => setPathIdx(i => (i + 1) % allPaths.length);
+
+  /* 空状態 */
+  if (allPaths.length === 0 || pathNodes.length < 2) {
+    return (
+      <div style={{ padding: 32, textAlign: 'center', color: '#999' }}>
+        <div style={{ fontSize: 14, marginBottom: 8 }}>プロファイルを表示するには</div>
+        <div style={{ fontSize: 12 }}>変圧器と2つ以上のノードを登録してください</div>
+      </div>
+    );
+  }
+
+  /* P3: データ準備 */
+  const dataPoints = pathNodes.map((node, i) => {
+    const r = allResults[node.id];
+    const Isc3 = r ? r.Isc3 : null;
+    const size = r ? r.size : null;
+    const parallel = r ? (r.parallel || 1) : 1;
+    const wt = (size && Isc3) ? checkWithstand(size, Isc3, 0.1, parallel) : null;
+    const label = node.type === 'transformer'
+      ? (node.transformer?.name || 'TR')
+      : node.type === 'trunk'
+        ? (node.trunk?.name || '幹線')
+        : (node.load?.name || '負荷');
+    return { id: node.id, type: node.type, label, Isc3, Iw: wt ? wt.Iwithstand : null, wtOK: wt ? wt.ok : null, size, parallel };
+  });
+
+  const validIsc = dataPoints.filter(d => d.Isc3 != null && d.Isc3 > 0);
+  if (validIsc.length === 0) {
+    return (
+      <div style={{ padding: 32, textAlign: 'center', color: '#999' }}>
+        <div style={{ fontSize: 14, marginBottom: 8 }}>短絡電流データがありません</div>
+        <div style={{ fontSize: 12 }}>変圧器を登録し、容量と%Zを設定してください</div>
+      </div>
+    );
+  }
+
+  /* P3: スケール計算 */
+  const allValues = validIsc.map(d => d.Isc3);
+  if (showIw) validIsc.forEach(d => { if (d.Iw) allValues.push(d.Iw); });
+  const maxVal = Math.max(...allValues);
+  const minVal = Math.min(...allValues.filter(v => v > 0));
+
+  const MARGIN = { top: 40, right: 30, bottom: 60, left: 65 };
+  const W = 600, H = 340;
+  const plotW = W - MARGIN.left - MARGIN.right;
+  const plotH = H - MARGIN.top - MARGIN.bottom;
+
+  const n = dataPoints.length;
+  const xScale = (i) => MARGIN.left + (n > 1 ? (i / (n - 1)) * plotW : plotW / 2);
+
+  const yDomain = logScale
+    ? [Math.pow(10, Math.floor(Math.log10(minVal * 0.8))), Math.pow(10, Math.ceil(Math.log10(maxVal * 1.2)))]
+    : [0, maxVal * 1.2];
+  const yScale = (v) => {
+    if (v <= 0) return MARGIN.top + plotH;
+    if (logScale) {
+      const logMin = Math.log10(yDomain[0]), logMax = Math.log10(yDomain[1]);
+      const t = (Math.log10(v) - logMin) / (logMax - logMin);
+      return MARGIN.top + plotH * (1 - t);
+    }
+    return MARGIN.top + plotH * (1 - v / yDomain[1]);
+  };
+
+  /* Y軸目盛り */
+  const yTicks = [];
+  if (logScale) {
+    const logMin = Math.floor(Math.log10(yDomain[0]));
+    const logMax = Math.ceil(Math.log10(yDomain[1]));
+    for (let e = logMin; e <= logMax; e++) yTicks.push(Math.pow(10, e));
+  } else {
+    const step = maxVal > 50 ? 20 : maxVal > 20 ? 10 : maxVal > 10 ? 5 : maxVal > 5 ? 2 : 1;
+    for (let v = 0; v <= yDomain[1]; v += step) yTicks.push(v);
+  }
+
+  /* P3: Isc₃ 折れ線パスデータ */
+  const iscPoints = dataPoints
+    .map((d, i) => d.Isc3 != null && d.Isc3 > 0 ? { x: xScale(i), y: yScale(d.Isc3), i } : null)
+    .filter(Boolean);
+  const iscPath = iscPoints.map((p, j) => `${j === 0 ? 'M' : 'L'}${p.x},${p.y}`).join(' ');
+
+  /* P4: Iw しきい値線（ノード区間ごとの水平ステップ） */
+  const iwSegments = [];
+  if (showIw) {
+    for (let i = 0; i < dataPoints.length; i++) {
+      const d = dataPoints[i];
+      if (d.Iw != null && d.type !== 'transformer') {
+        const x1 = i > 0 ? (xScale(i - 1) + xScale(i)) / 2 : xScale(i) - plotW / (2 * n);
+        const x2 = i < dataPoints.length - 1 ? (xScale(i) + xScale(i + 1)) / 2 : xScale(i) + plotW / (2 * n);
+        iwSegments.push({ x1: Math.max(x1, MARGIN.left), x2: Math.min(x2, MARGIN.left + plotW), y: yScale(d.Iw), Iw: d.Iw, label: d.label, ok: d.wtOK });
+      }
+    }
+  }
+
+  /* P6: 交差点検出（Isc₃ > Iw の区間） */
+  const violations = dataPoints.filter(d => d.Isc3 && d.Iw && d.Isc3 > d.Iw);
+
+  /* パンくず表示 */
+  const breadcrumb = pathNodes.map(n => {
+    if (n.type === 'transformer') return n.transformer?.name || 'TR';
+    if (n.type === 'trunk') return n.trunk?.name || '幹線';
+    return n.load?.name || '負荷';
+  }).join(' → ');
+
+  /* ツールチップ */
+  const tooltipData = hovered != null ? dataPoints[hovered] : null;
+
+  const fmtKA = (v) => v != null ? (v >= 1000 ? rd(v / 1000, 1) + ' kA' : rd(v) + ' A') : '—';
+  const fmtIsc = (v) => v != null ? rd(v / 1000, 2) + ' kA' : '—';
+
+  return (
+    <div style={{ padding: 16, height: '100%', display: 'flex', flexDirection: 'column', overflow: 'auto' }}>
+      {/* P5: 経路選択ヘッダ */}
+      <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 12, flexShrink: 0 }}>
+        <button onClick={prevPath} disabled={allPaths.length <= 1}
+          style={{ padding: '2px 8px', fontSize: 12, border: '1px solid #ccc', borderRadius: 3, background: '#fff', cursor: 'pointer' }}>◀</button>
+        <div style={{ flex: 1, fontSize: 12, color: '#333', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+          <span style={{ color: '#999', marginRight: 6 }}>経路 {pathIdx + 1}/{allPaths.length}:</span>
+          {breadcrumb}
+        </div>
+        <button onClick={nextPath} disabled={allPaths.length <= 1}
+          style={{ padding: '2px 8px', fontSize: 12, border: '1px solid #ccc', borderRadius: 3, background: '#fff', cursor: 'pointer' }}>▶</button>
+      </div>
+
+      {/* P3/P4: SVG チャート */}
+      <div style={{ flex: 1, minHeight: 0, display: 'flex', justifyContent: 'center' }}>
+        <svg viewBox={`0 0 ${W} ${H}`} style={{ width: '100%', maxWidth: W, height: 'auto' }}>
+          {/* グリッド */}
+          {yTicks.map(v => (
+            <g key={v}>
+              <line x1={MARGIN.left} x2={MARGIN.left + plotW} y1={yScale(v)} y2={yScale(v)}
+                stroke="#e8e8e8" strokeWidth={0.5} />
+              <text x={MARGIN.left - 8} y={yScale(v)} textAnchor="end" dominantBaseline="middle"
+                fontSize={10} fill="#888">{v >= 1000 ? (v / 1000) + 'k' : v}</text>
+            </g>
+          ))}
+          {/* 軸ラベル */}
+          <text x={14} y={MARGIN.top + plotH / 2} textAnchor="middle" dominantBaseline="middle"
+            fontSize={11} fill="#666" transform={`rotate(-90, 14, ${MARGIN.top + plotH / 2})`}>Isc₃ [kA]</text>
+
+          {/* プロットエリア枠 */}
+          <rect x={MARGIN.left} y={MARGIN.top} width={plotW} height={plotH}
+            fill="none" stroke="#ccc" strokeWidth={0.5} />
+
+          {/* P4: Iw しきい値線 */}
+          {iwSegments.map((seg, i) => (
+            <g key={'iw' + i}>
+              <line x1={seg.x1} x2={seg.x2} y1={seg.y} y2={seg.y}
+                stroke={seg.ok ? '#66bb6a' : '#ef5350'} strokeWidth={1.5} strokeDasharray="6,3" />
+              {i === 0 && (
+                <text x={seg.x2 + 4} y={seg.y} dominantBaseline="middle"
+                  fontSize={9} fill="#66bb6a">Iw</text>
+              )}
+            </g>
+          ))}
+
+          {/* P3: Isc₃ 折れ線 */}
+          <path d={iscPath} fill="none" stroke="#1976d2" strokeWidth={2} />
+
+          {/* P3/P6: ノード点 */}
+          {dataPoints.map((d, i) => {
+            if (d.Isc3 == null || d.Isc3 <= 0) return null;
+            const x = xScale(i), y = yScale(d.Isc3);
+            const isViolation = d.Iw && d.Isc3 > d.Iw;
+            const isSelected = d.id === selectedId;
+            return (
+              <g key={d.id}
+                onMouseEnter={() => setHovered(i)} onMouseLeave={() => setHovered(null)}
+                onClick={() => { const node = nodes.find(n => n.id === d.id); if (node) onSelectNode(node); }}
+                style={{ cursor: 'pointer' }}>
+                {/* ノード点 */}
+                <circle cx={x} cy={y} r={isSelected ? 6 : 4.5}
+                  fill={isViolation ? '#ef5350' : '#1976d2'} stroke={isSelected ? '#0d47a1' : '#fff'} strokeWidth={isSelected ? 2 : 1.5} />
+                {/* Isc₃ 値ラベル */}
+                <text x={x} y={y - 10} textAnchor="middle" fontSize={9} fontWeight={600}
+                  fill={isViolation ? '#c62828' : '#1565c0'}>{rd(d.Isc3 / 1000, 1)}</text>
+              </g>
+            );
+          })}
+
+          {/* X軸ノードラベル */}
+          {dataPoints.map((d, i) => {
+            const x = xScale(i);
+            const typeIcon = d.type === 'transformer' ? '[TR]' : d.type === 'trunk' ? '[幹]' : '';
+            return (
+              <g key={'xl' + i}>
+                <text x={x} y={MARGIN.top + plotH + 14} textAnchor="middle" fontSize={9} fill="#666">{typeIcon}</text>
+                <text x={x} y={MARGIN.top + plotH + 26} textAnchor="middle" fontSize={9} fill="#333"
+                  fontWeight={d.id === selectedId ? 700 : 400}>{d.label.length > 8 ? d.label.slice(0, 7) + '…' : d.label}</text>
+                {d.size && (
+                  <text x={x} y={MARGIN.top + plotH + 38} textAnchor="middle" fontSize={8} fill="#999">
+                    {d.size}{d.parallel > 1 ? '×' + d.parallel : ''}sq
+                  </text>
+                )}
+              </g>
+            );
+          })}
+
+          {/* P6: ホバーツールチップ */}
+          {tooltipData && (() => {
+            const i = hovered;
+            const x = Math.min(Math.max(xScale(i), MARGIN.left + 70), MARGIN.left + plotW - 70);
+            const y = dataPoints[i].Isc3 > 0 ? yScale(dataPoints[i].Isc3) : MARGIN.top;
+            const tipY = y > MARGIN.top + plotH / 2 ? y - 72 : y + 16;
+            return (
+              <g>
+                <rect x={x - 65} y={tipY} width={130} height={64} rx={4}
+                  fill="rgba(33,33,33,0.92)" stroke="none" />
+                <text x={x} y={tipY + 14} textAnchor="middle" fontSize={10} fontWeight={700} fill="#fff">{tooltipData.label}</text>
+                <text x={x - 55} y={tipY + 28} fontSize={9} fill="#90caf9">Isc₃ = {fmtIsc(tooltipData.Isc3)}</text>
+                {tooltipData.Iw && (
+                  <text x={x - 55} y={tipY + 40} fontSize={9} fill={tooltipData.wtOK ? '#a5d6a7' : '#ef9a9a'}>
+                    Iw = {fmtIsc(tooltipData.Iw)} ({tooltipData.wtOK ? '余裕 ×' + rd(tooltipData.Iw / tooltipData.Isc3, 1) : 'NG'})
+                  </text>
+                )}
+                {tooltipData.size && (
+                  <text x={x - 55} y={tipY + 52} fontSize={9} fill="#bbb">
+                    {tooltipData.size}{tooltipData.parallel > 1 ? '×' + tooltipData.parallel : ''} mm²
+                  </text>
+                )}
+              </g>
+            );
+          })()}
+        </svg>
+      </div>
+
+      {/* P7: レイヤートグル + スケール切替 */}
+      <div style={{ display: 'flex', gap: 16, alignItems: 'center', marginTop: 8, flexShrink: 0, fontSize: 12, color: '#666' }}>
+        <label style={{ display: 'flex', alignItems: 'center', gap: 4, cursor: 'pointer' }}>
+          <input type="checkbox" checked={showIw} onChange={e => setShowIw(e.target.checked)} />
+          ケーブル耐量 (Iw)
+        </label>
+        <div style={{ marginLeft: 'auto', display: 'flex', gap: 4 }}>
+          <button onClick={() => setLogScale(true)}
+            style={{ padding: '2px 8px', fontSize: 11, border: logScale ? '1px solid #1976d2' : '1px solid #ccc',
+              borderRadius: 3, background: logScale ? '#e3f2fd' : '#fff', color: logScale ? '#1976d2' : '#666', cursor: 'pointer' }}>対数</button>
+          <button onClick={() => setLogScale(false)}
+            style={{ padding: '2px 8px', fontSize: 11, border: !logScale ? '1px solid #1976d2' : '1px solid #ccc',
+              borderRadius: 3, background: !logScale ? '#e3f2fd' : '#fff', color: !logScale ? '#1976d2' : '#666', cursor: 'pointer' }}>線形</button>
+        </div>
+      </div>
+
+      {/* 警告サマリー */}
+      {violations.length > 0 && (
+        <div style={{ marginTop: 8, padding: '8px 12px', background: '#fff3e0', borderRadius: 4, border: '1px solid #ffe0b2', fontSize: 12, flexShrink: 0 }}>
+          <span style={{ color: '#e65100', fontWeight: 700 }}>熱耐量超過: </span>
+          {violations.map(v => v.label).join(', ')} で Isc₃ > Iw
         </div>
       )}
     </div>
@@ -3542,7 +3853,8 @@ function App() {
             {[
               { key: 'table', label: 'テーブル' },
               { key: 'diagram', label: '系統図' },
-              { key: 'split', label: '分割' }
+              { key: 'split', label: '分割' },
+              { key: 'profile', label: 'プロファイル' }
             ].map(tab => (
               <button key={tab.key} onClick={() => setRightPaneView(tab.key)}
                 style={{
@@ -3622,6 +3934,16 @@ function App() {
                 mode={diagramMode} onNodesChange={setNodes}
                 groups={groups} crossLinks={crossLinks}
                 onToggleGroupCollapse={handleToggleGroupCollapse}
+              />
+            </div>
+          )}
+
+          {/* プロファイルビュー (M2-3-P) */}
+          {rightPaneView === 'profile' && (
+            <div style={{ flex: 1, overflow: 'hidden' }}>
+              <ProfileTab
+                nodes={nodes} allResults={allResults}
+                selectedId={selectedId} onSelectNode={handleSelectNode}
               />
             </div>
           )}
