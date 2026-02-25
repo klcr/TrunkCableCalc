@@ -386,6 +386,7 @@ function runParentCalc(children, cfg) {
 function calcTransformer(tr) {
   const S = tr.capacity_kVA * 1000;
   const Vs = tr.secondaryV;
+  const threePhase = tr.trType !== '単相油入';
   let Rs, Xs;
   if (tr.xrRatio != null && tr.xrRatio > 0) {
     const pctR = tr.pctZ / Math.sqrt(1 + tr.xrRatio * tr.xrRatio);
@@ -397,9 +398,9 @@ function calcTransformer(tr) {
     Xs = 0;
   }
   const Zs = Math.sqrt(Rs * Rs + Xs * Xs);
-  const In = isThreePhase('三相3線式') ? S / (Math.sqrt(3) * Vs) : S / Vs;
-  const Isc3 = Vs / (Math.sqrt(3) * Zs);
-  return { Rs, Xs, Zs, In, Isc3, pctZ: tr.pctZ, capacity_kVA: tr.capacity_kVA };
+  const In = threePhase ? S / (Math.sqrt(3) * Vs) : S / Vs;
+  const Isc3 = threePhase ? Vs / (Math.sqrt(3) * Zs) : Vs / Zs;
+  return { Rs, Xs, Zs, In, Isc3, pctZ: tr.pctZ, capacity_kVA: tr.capacity_kVA, threePhase };
 }
 
 /**
@@ -519,7 +520,23 @@ function calcFaultCurrents(nodes, allResults) {
   if (!tr) return;
   const trR = allResults[tr.id];
   if (!trR) return;
-  // M2-3: HV integration point — hvSystem impedance would be added here
+  /* M2-3: HV cable impedance LV conversion (§20-2)
+   * 高圧ケーブルインピーダンスを LV 側に換算して Rsrc, Xsrc に加算する。
+   * P4 では hvSystem フィールドは全て null のため実行されない。
+   *
+   * const hv = tr.transformer.hvSystem;
+   * let Rsrc = trR.Rs, Xsrc = trR.Xs;
+   * if (hv && hv.cableType && hv.cableSize_mm2 && hv.totalCableLength_km) {
+   *   const freq = '50Hz'; // TODO: 系統周波数を transformer に持たせる
+   *   const hvImp = IMP_HV[freq] && IMP_HV[freq][String(hv.cableSize_mm2)];
+   *   if (hvImp) {
+   *     const ratio = Math.pow(tr.transformer.secondaryV / tr.transformer.primaryV, 2);
+   *     Rsrc += hvImp[0] * hv.totalCableLength_km * ratio;
+   *     Xsrc += hvImp[1] * hv.totalCableLength_km * ratio;
+   *   }
+   * }
+   * propagateFault(nodes, tr.id, Rsrc, Xsrc, tr.transformer.secondaryV, allResults);
+   */
   propagateFault(nodes, tr.id, trR.Rs, trR.Xs, tr.transformer.secondaryV, allResults);
 }
 
@@ -594,7 +611,19 @@ function calculateAll(nodes) {
   /* 5. トップダウン: 短絡電流 */
   calcFaultCurrents(nodes, results);
 
-  // M2-3: Ground fault current Ig = 3ωCV — reserved for future
+  /* M2-3: 一線地絡電流 Ig = 3ωCV (§20-5)
+   * 非接地系 6.6kV 系統における一線地絡電流。
+   * 変圧器の hvSystem.capacitance_uF_per_km と系統全長から算出。
+   *
+   * function calcGroundFaultCurrent(freq, capacitance_uF, lineVoltage) {
+   *   const omega = 2 * Math.PI * (freq === '50Hz' ? 50 : 60);
+   *   const C = capacitance_uF * 1e-6; // [F]
+   *   return 3 * omega * C * (lineVoltage / Math.sqrt(3)); // [A]
+   * }
+   *
+   * §20-8: ELCB 保護協調 — TT系統: RA × IΔn ≤ 50V
+   * ELCB テーブル (data/elcb-specs.json) の感度電流・動作時間を使用。
+   */
 
   return results;
 }
@@ -645,7 +674,12 @@ const DEFAULT_TR_PARAMS = {
   name: 'TR-1', trType: '三相油入', capacity_kVA: 500,
   primaryV: 6600, secondaryV: 210,
   pctZ: 4.00, xrRatio: 2.98, connection: 'Δ-Y', pctZAuto: true,
-  hvSystem: null /* P4-7: reserved for M2-3 */
+  hvSystem: { /* P4-7: reserved for M2-3 (§19-5) */
+    cableType: null,            /* 'CV-3C' | 'CVT' | null */
+    cableSize_mm2: null,        /* number | null */
+    totalCableLength_km: null,  /* number | null */
+    capacitance_uF_per_km: null /* number | null */
+  }
 };
 
 /* --- 幹線デフォルト (§9) --- */
@@ -1201,7 +1235,7 @@ function TrunkForm({ trunkParams, setTrunkParams, onSave, onCancel, isEdit, chil
 }
 
 /* --- TreeTable 登録一覧ツリー表示 (§12) --- */
-function TreeTable({ nodes, allResults, selectedId, onSelect, onDelete }) {
+function TreeTable({ nodes, allResults, selectedId, onSelect, onDelete, onAddChild }) {
   if (nodes.length === 0) return (
     <div style={{ color: '#999', padding: 16, fontSize: 13 }}>
       変圧器または負荷回路を登録してください
@@ -1257,7 +1291,11 @@ function TreeTable({ nodes, allResults, selectedId, onSelect, onDelete }) {
           <td style={{ padding: '6px 4px', fontSize: 12, textAlign: 'right' }}>
             {r && r.Isc3 ? `${rd(r.Isc3 / 1000, 1)}kA` : '-'}
           </td>
-          <td style={{ padding: '6px 2px' }}>
+          <td style={{ padding: '6px 2px', whiteSpace: 'nowrap' }}>
+            {(isTr || (isTrunk && depth < 2)) && onAddChild && (
+              <button onClick={e => { e.stopPropagation(); onAddChild(node); }}
+                style={{ border: 'none', background: 'none', color: '#1976d2', cursor: 'pointer', fontSize: 14, padding: '2px 6px', fontWeight: 700 }}>+</button>
+            )}
             <button onClick={e => { e.stopPropagation(); onDelete(node.id); }}
               style={{ border: 'none', background: 'none', color: '#f44336', cursor: 'pointer', fontSize: 14, padding: '2px 6px' }}>×</button>
           </td>
@@ -1412,7 +1450,7 @@ function App() {
         trunk = {
           id: genId(), type: 'trunk', parentId: trId,
           order: getChildren(updated, trId).length,
-          ts: new Date().toISOString(),
+          ts: new Date().toISOString(), externalRef: null,
           trunk: {
             ...DEFAULT_TRUNK_PARAMS, name: params.trunkName,
             system: params.system, voltage: params.voltage,
@@ -1424,7 +1462,7 @@ function App() {
       const loadNode = {
         id: genId(), type: 'load', parentId: trunk.id,
         order: getChildren(updated, trunk.id).length,
-        ts: new Date().toISOString(),
+        ts: new Date().toISOString(), externalRef: null,
         load: { ...params }
       };
       updated = addNode(updated, loadNode);
@@ -1460,7 +1498,18 @@ function App() {
 
   /* --- CRUD: ノード削除 --- */
   const handleDeleteNode = (id) => {
-    setNodes(prev => removeNode(prev, id));
+    setNodes(prev => {
+      const target = prev.find(n => n.id === id);
+      let updated = removeNode(prev, id);
+      /* §13: load 削除後に親 trunk の子が 0 件なら trunk も自動削除 */
+      if (target && target.type === 'load' && target.parentId) {
+        const parentTrunk = updated.find(n => n.id === target.parentId);
+        if (parentTrunk && parentTrunk.type === 'trunk' && getChildren(updated, parentTrunk.id).length === 0) {
+          updated = removeNode(updated, parentTrunk.id);
+        }
+      }
+      return updated;
+    });
     if (selectedId === id) resetToNewLoad();
   };
 
@@ -1471,7 +1520,7 @@ function App() {
     } else {
       setNodes(prev => addNode(prev, {
         id: genId(), type: 'transformer', parentId: null,
-        order: 0, ts: new Date().toISOString(),
+        order: 0, ts: new Date().toISOString(), externalRef: null,
         transformer: { ...trParams }
       }));
       resetToNewLoad();
@@ -1481,6 +1530,28 @@ function App() {
   /* --- CRUD: 幹線更新 --- */
   const handleSaveTrunk = () => {
     if (selectedId && selectedNode?.type === 'trunk') handleUpdateNode();
+  };
+
+  /* --- ツリー: 子ノード追加 --- */
+  const handleAddChild = (parentNode) => {
+    if (parentNode.type === 'transformer') {
+      setSelectedId(null);
+      setEditMode('trunk');
+      setTrunkParams({ ...DEFAULT_TRUNK_PARAMS, voltage: parentNode.transformer?.secondaryV || 210 });
+    } else if (parentNode.type === 'trunk') {
+      setSelectedId(null);
+      setEditMode('load');
+      setParams({ ...DEFAULT_PARAMS, trunkName: parentNode.trunk?.name || '' });
+      setDisplay({
+        capacity: String(DEFAULT_PARAMS.capacity),
+        powerFactor: String(DEFAULT_PARAMS.powerFactor),
+        efficiency: String(DEFAULT_PARAMS.efficiency),
+        demandFactor: String(DEFAULT_PARAMS.demandFactor),
+        cableLength: String(DEFAULT_PARAMS.cableLength),
+        ambientTemp: String(DEFAULT_PARAMS.ambientTemp),
+        reductionFactor: String(DEFAULT_PARAMS.reductionFactor)
+      });
+    }
   };
 
   /* --- 行クリック: ノード選択 --- */
@@ -1812,6 +1883,7 @@ function App() {
             <TreeTable
               nodes={nodes} allResults={allResults} selectedId={selectedId}
               onSelect={handleSelectNode} onDelete={handleDeleteNode}
+              onAddChild={handleAddChild}
             />
           </div>
         </div>

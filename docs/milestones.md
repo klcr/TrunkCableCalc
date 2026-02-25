@@ -12,7 +12,7 @@ GitHub Pages で公開する単一 HTML ファイルの Web アプリケーシ�
 | P1 | 参照データ整備 + ビルド基盤 | `data/` JSON, `scripts/build.js`, `src/index.html` テンプレート | §10 | 完了 |
 | P2 | 計算エンジン（子回路） | `runCalc` 実装（設計電流→ケーブル選定→MCCB→保護協調） | §8 | 完了 |
 | P3 | UI: 入力フォーム＋結果表示 | 左右ペインレイアウト、連動制御、スライダーUI | §2,3,5,6,7,11 | 完了 |
-| P4 | マルチノード配電系統＋登録管理 | 4階層ツリー、変圧器/%Z、CRUD、地絡電流 | §4,9,12,13,18,19,20 | 未着手 |
+| P4 | マルチノード配電系統＋登録管理 | 4階層ツリー、変圧器/%Z、CRUD、地絡電流 | §4,9,12,13,18,19,20 | 完了 |
 | P5 | Import/Export＋PDF出力 | JSON保存/読込、電-8-1 形式計算書出力 | §14,15 | 未着手 |
 | P6 | 検証・デプロイ | 手計算との突合、エッジケース対応、GitHub Pages 公開 | §16 | 未着手 |
 
@@ -58,36 +58,36 @@ HV 側（対地静電容量基準）は M2-3 との統合を見据えたデー�
 
 #### P4-1: データモデル・ツリー状態管理
 
-- [ ] ノードスキーマ定義（transformer / trunk / load の 3 タイプ）
-- [ ] App ステートにノード配列 `nodes` 導入
-- [ ] ノード CRUD 関数（genId, addNode, updateNode, removeNode）
-- [ ] ツリー走査ユーティリティ（getChildren, getParent, getAncestors, getDepth, buildTree）
-- [ ] 4 階層 depth 制約の実装
-- [ ] 仕様書更新（§18 配電系統ツリーモデル）
+- [x] ノードスキーマ定義（transformer / trunk / load の 3 タイプ）
+- [x] App ステートにノード配列 `nodes` 導入
+- [x] ノード CRUD 関数（genId, addNode, updateNode, removeNode）
+- [x] ツリー走査ユーティリティ（getChildren, getParent, getAncestors, getDepth, buildTree）
+- [x] 4 階層 depth 制約の実装
+- [x] 仕様書更新（§18 配電系統ツリーモデル）
 
 #### P4-2: 負荷回路 CRUD
 
-- [ ] 登録ボタンの有効化・バリデーション（幹線名必須、容量>0、結果存在）
-- [ ] 子回路の登録（nodes に load ノード追加）
-- [ ] 幹線名による trunk ノード自動作成（同一名 2 件以上で自動生成）
-- [ ] 子回路の編集（行クリック → フォーム復元 → 「更新」ボタン）
-- [ ] 子回路の削除（× ボタン、trunk 連動削除）
+- [x] 登録ボタンの有効化・バリデーション（幹線名必須、容量>0、結果存在）
+- [x] 子回路の登録（nodes に load ノード追加）
+- [x] 幹線名による trunk ノード自動作成（同一名 2 件以上で自動生成）
+- [x] 子回路の編集（行クリック → フォーム復元 → 「更新」ボタン）
+- [x] 子回路の削除（× ボタン、trunk 連動削除）
 
 #### P4-3: ツリー表示・ナビゲーション
 
-- [ ] TreeTable コンポーネント（右ペイン下部）
-- [ ] ノードタイプ別表示（[TR] / [主幹] / └ インデント）
-- [ ] テーブルカラム（種別、名称、方式/電圧、設計電流、ケーブル、AT、電圧降下、判定、操作）
-- [ ] 行クリック → ノード選択 → 左ペイン切替（load / trunk / transformer の 3 モード）
-- [ ] + ボタンで子ノード追加
+- [x] TreeTable コンポーネント（右ペイン下部）
+- [x] ノードタイプ別表示（[TR] / [主幹] / └ インデント）
+- [x] テーブルカラム（種別、名称、方式/電圧、設計電流、ケーブル、AT、電圧降下、判定、操作）
+- [x] 行クリック → ノード選択 → 左ペイン切替（load / trunk / transformer の 3 モード）
+- [x] + ボタンで子ノード追加
 
 #### P4-4: 多階層幹線計算（再帰）
 
-- [ ] aggregateCurrents: 再帰的ボトムアップ電流集計（trunk の子に trunk を含む場合対応）
-- [ ] runParentCalc 拡張（or runTrunkCalc 新設）
-- [ ] calcCumulativeVd: トップダウン累積電圧降下
-- [ ] calculateAll: 全ノード一括計算（トポロジカルソート → useMemo）
-- [ ] 電動機判定の再帰的伝播（子孫に 1 つでも電動機があれば hasMotor）
+- [x] aggregateCurrents: 再帰的ボトムアップ電流集計（trunk の子に trunk を含む場合対応）
+- [x] runParentCalc 拡張（or runTrunkCalc 新設）
+- [x] calcCumulativeVd: トップダウン累積電圧降下
+- [x] calculateAll: 全ノード一括計算（トポロジカルソート → useMemo）
+- [x] 電動機判定の再帰的伝播（子孫に 1 つでも電動機があれば hasMotor）
 
 #### P4-5: 変圧器ノード
 
@@ -95,19 +95,19 @@ HV 側（対地静電容量基準）は M2-3 との統合を見据えたデー�
 - [x] scripts/build.js に transformer-ratings.json → TR_RATINGS 注入追加
 - [x] 仕様書更新（§19 変圧器ノード: 種別追加、%Z/X/R比テーブル差替え、R+jX分解式追加）
 - [x] CLAUDE.md 更新（TR_RATINGS 記載更新、IMP_HV/Z_ZERO/WITHSTAND/ELCB 追記）
-- [ ] calcTransformer 関数: %Z+X/R比 → Rs+jXs ソースインピーダンス分解、定格電流、短絡電流、利用率
-- [ ] 変圧器編集フォーム（名称、種別、容量、一次/二次電圧、%Z、X/R比、結線方式）
-- [ ] 電圧継承: secondaryVoltage → 下位ノードの voltage 自動設定
+- [x] calcTransformer 関数: %Z+X/R比 → Rs+jXs ソースインピーダンス分解、定格電流、短絡電流、利用率
+- [x] 変圧器編集フォーム（名称、種別、容量、一次/二次電圧、%Z、X/R比、結線方式）
+- [x] 電圧継承: secondaryVoltage → 下位ノードの voltage 自動設定
 
 #### P4-6: 短絡電流計算（LV 側 — R+jX ベクトル累積）
 
 - [x] data/short-time-withstand.json 新規作成（K定数テーブル、I²t値）
 - [x] scripts/build.js に short-time-withstand.json → WITHSTAND 注入追加
 - [x] 仕様書更新（§20 R+jXベクトル累積方式に変更、§20-6 短時間耐電流検証 追加）
-- [ ] calcFaultCurrents: 変圧器 Rs+jXs を起点に R,X を独立累積、各ノード |Ztotal|→Isc₃ 算出
-- [ ] checkWithstand: ケーブル I²t 耐量 vs Isc₃²×t 検証
-- [ ] ResultPanel に利用可能短絡電流 Isc₃ + 熱耐量 OK/NG 表示追加
-- [ ] TreeTable に Isc₃ 列追加（オプション）
+- [x] calcFaultCurrents: 変圧器 Rs+jXs を起点に R,X を独立累積、各ノード |Ztotal|→Isc₃ 算出
+- [x] checkWithstand: ケーブル I²t 耐量 vs Isc₃²×t 検証
+- [x] ResultPanel に利用可能短絡電流 Isc₃ + 熱耐量 OK/NG 表示追加
+- [x] TreeTable に Isc₃ 列追加（オプション）
 
 #### P4-7: HV 側データモデル準備
 
@@ -116,10 +116,10 @@ HV 側（対地静電容量基準）は M2-3 との統合を見据えたデー�
 - [x] data/elcb-specs.json 新規作成（ELCB感度電流・動作時間）
 - [x] scripts/build.js に IMP_HV/Z_ZERO/C_CABLE/ELCB 注入追加
 - [x] 仕様書更新（§19-5 HVケーブルインピーダンスフィールド追加、§20-7/20-8 将来実装節追加）
-- [ ] transformer ノードスキーマに hvSystem 予約フィールド追加（cableType, cableSize, totalCableLength_km, capacitance_uF_per_km）
-- [ ] HV ケーブルインピーダンスの LV 側換算（calcFaultCurrents 内でオプション使用）
-- [ ] Ig = 3ωCV 計算スタブ（コメントのみ）
-- [ ] M2-3 統合ポイントの明記
+- [x] transformer ノードスキーマに hvSystem 予約フィールド追加（cableType, cableSize, totalCableLength_km, capacitance_uF_per_km）
+- [x] HV ケーブルインピーダンスの LV 側換算（calcFaultCurrents 内でオプション使用）
+- [x] Ig = 3ωCV 計算スタブ（コメントのみ）
+- [x] M2-3 統合ポイントの明記
 
 ### P5: Import/Export＋PDF出力
 
