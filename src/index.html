@@ -262,7 +262,7 @@ function runCalc(p) {
     if (!protOK) continue;
 
     return {
-      ok: true, size: sz, dI: rd(dI), sizingI: rd(sizingI), mccbAT,
+      ok: true, size: sz, parallel: 1, dI: rd(dI), sizingI: rd(sizingI), mccbAT,
       baseAmpacity: bA, tempFactor: rd(tF, 3), reductionFactor: p.reductionFactor,
       effectiveAmpacity: rd(eA), Z: rd(Z, 4), K,
       vd: rd(vd), vdPercent: rd(vdP),
@@ -271,7 +271,41 @@ function runCalc(p) {
     };
   }
 
-  /* 全サイズ不適合 — 最大サイズで NG 結果を返す */
+  /* 325×2 並列試行 — 単線で全サイズ不適合の場合 */
+  {
+    const sz2 = 325;
+    const bA2 = getBaseAmpacity(p.cableType, p.wiringMethod, sz2);
+    const imp2 = getImpedance(p.cableType, p.freq, sz2);
+    if (bA2 !== null && imp2) {
+      const eA2 = bA2 * 2 * tF * p.reductionFactor;
+      const Z2 = (imp2[0] * PF + imp2[1] * sinT) / 2;
+      const vd2 = K * dI * (p.cableLength / 1000) * Z2;
+      const vdP2 = baseV > 0 ? vd2 / baseV * 100 : 0;
+      const protOK2 = p.circuitType === '電動機' ? eA2 >= mccbAT / 2.5 : eA2 >= mccbAT;
+      if (eA2 >= sizingI && vdP2 <= allowVdP && protOK2) {
+        return {
+          ok: true, size: sz2, parallel: 2, dI: rd(dI), sizingI: rd(sizingI), mccbAT,
+          baseAmpacity: bA2 * 2, tempFactor: rd(tF, 3), reductionFactor: p.reductionFactor,
+          effectiveAmpacity: rd(eA2), Z: rd(Z2, 4), K,
+          vd: rd(vd2), vdPercent: rd(vdP2),
+          allowVd: rd(baseV * allowVdP / 100), allowVdPercent: allowVdP,
+          ampacityOK: true, vdOK: true, protOK: true
+        };
+      }
+      /* 325×2 でも不適合 — NG 結果を返す */
+      return {
+        ok: false, size: sz2, parallel: 2, dI: rd(dI), sizingI: rd(sizingI), mccbAT,
+        baseAmpacity: bA2 * 2, tempFactor: rd(tF, 3), reductionFactor: p.reductionFactor,
+        effectiveAmpacity: rd(eA2), Z: rd(Z2, 4), K,
+        vd: rd(vd2), vdPercent: rd(vdP2),
+        allowVd: rd(baseV * allowVdP / 100), allowVdPercent: allowVdP,
+        ampacityOK: eA2 >= sizingI, vdOK: vdP2 <= allowVdP,
+        protOK: p.circuitType === '電動機' ? eA2 >= mccbAT / 2.5 : eA2 >= mccbAT
+      };
+    }
+  }
+
+  /* 全サイズ不適合（325データなし） — 最大サイズで NG 結果を返す */
   const sz = sizes[sizes.length - 1];
   const bA = getBaseAmpacity(p.cableType, p.wiringMethod, sz);
   const eA = bA !== null ? bA * tF * p.reductionFactor : 0;
@@ -281,7 +315,7 @@ function runCalc(p) {
   const vdP = baseV > 0 ? vd / baseV * 100 : 0;
 
   return {
-    ok: false, size: sz, dI: rd(dI), sizingI: rd(sizingI), mccbAT,
+    ok: false, size: sz, parallel: 1, dI: rd(dI), sizingI: rd(sizingI), mccbAT,
     baseAmpacity: bA || 0, tempFactor: rd(tF, 3), reductionFactor: p.reductionFactor,
     effectiveAmpacity: rd(eA), Z: rd(Z, 4), K,
     vd: rd(vd), vdPercent: rd(vdP),
@@ -349,7 +383,7 @@ function runParentCalc(children, cfg) {
     if (!protOK) continue;
 
     return {
-      ok: true, size: sz, totalI: rd(totalI), sumIM: rd(sumIM), sumIH: rd(sumIH),
+      ok: true, size: sz, parallel: 1, totalI: rd(totalI), sumIM: rd(sumIM), sumIH: rd(sumIH),
       hasMotor, sizingI: rd(sizingI), mccbAT,
       baseAmpacity: bA, tempFactor: rd(tF, 3), reductionFactor: cfg.reductionFactor,
       effectiveAmpacity: rd(eA), Z: rd(Z, 4), K,
@@ -359,7 +393,42 @@ function runParentCalc(children, cfg) {
     };
   }
 
-  /* 全サイズ不適合 */
+  /* 325×2 並列試行 */
+  {
+    const sz2 = 325;
+    const bA2 = getBaseAmpacity(cfg.cableType, cfg.wiringMethod, sz2);
+    const imp2 = getImpedance(cfg.cableType, freq, sz2);
+    if (bA2 !== null && imp2) {
+      const eA2 = bA2 * 2 * tF * cfg.reductionFactor;
+      const Z2 = (imp2[0] * PF + imp2[1] * sinT) / 2;
+      const vd2 = K * totalI * (cfg.cableLength / 1000) * Z2;
+      const vdP2 = baseV > 0 ? vd2 / baseV * 100 : 0;
+      const protOK2 = hasMotor ? eA2 >= mccbAT / 2.5 : eA2 >= mccbAT;
+      if (eA2 >= sizingI && vdP2 <= allowVdP && protOK2) {
+        return {
+          ok: true, size: sz2, parallel: 2, totalI: rd(totalI), sumIM: rd(sumIM), sumIH: rd(sumIH),
+          hasMotor, sizingI: rd(sizingI), mccbAT,
+          baseAmpacity: bA2 * 2, tempFactor: rd(tF, 3), reductionFactor: cfg.reductionFactor,
+          effectiveAmpacity: rd(eA2), Z: rd(Z2, 4), K,
+          vd: rd(vd2), vdPercent: rd(vdP2),
+          allowVd: rd(baseV * allowVdP / 100), allowVdPercent: allowVdP,
+          ampacityOK: true, vdOK: true, protOK: true
+        };
+      }
+      return {
+        ok: false, size: sz2, parallel: 2, totalI: rd(totalI), sumIM: rd(sumIM), sumIH: rd(sumIH),
+        hasMotor, sizingI: rd(sizingI), mccbAT,
+        baseAmpacity: bA2 * 2, tempFactor: rd(tF, 3), reductionFactor: cfg.reductionFactor,
+        effectiveAmpacity: rd(eA2), Z: rd(Z2, 4), K,
+        vd: rd(vd2), vdPercent: rd(vdP2),
+        allowVd: rd(baseV * allowVdP / 100), allowVdPercent: allowVdP,
+        ampacityOK: eA2 >= sizingI, vdOK: vdP2 <= allowVdP,
+        protOK: hasMotor ? eA2 >= mccbAT / 2.5 : eA2 >= mccbAT
+      };
+    }
+  }
+
+  /* 全サイズ不適合（325データなし） */
   const sz = sizes[sizes.length - 1];
   const bA = getBaseAmpacity(cfg.cableType, cfg.wiringMethod, sz);
   const eA = bA !== null ? bA * tF * cfg.reductionFactor : 0;
@@ -369,7 +438,7 @@ function runParentCalc(children, cfg) {
   const vdP = baseV > 0 ? vd / baseV * 100 : 0;
 
   return {
-    ok: false, size: sz, totalI: rd(totalI), sumIM: rd(sumIM), sumIH: rd(sumIH),
+    ok: false, size: sz, parallel: 1, totalI: rd(totalI), sumIM: rd(sumIM), sumIH: rd(sumIH),
     hasMotor, sizingI: rd(sizingI), mccbAT,
     baseAmpacity: bA || 0, tempFactor: rd(tF, 3), reductionFactor: cfg.reductionFactor,
     effectiveAmpacity: rd(eA), Z: rd(Z, 4), K,
@@ -466,7 +535,7 @@ function runTrunkCalc(trunk, agg) {
     if (!protOK) continue;
 
     return {
-      ok: true, size: sz, dI: rd(totalI), totalI: rd(totalI),
+      ok: true, size: sz, parallel: 1, dI: rd(totalI), totalI: rd(totalI),
       sumIM: rd(sumIM), sumIH: rd(sumIH), hasMotor, sizingI: rd(sizingI), mccbAT,
       baseAmpacity: bA, tempFactor: rd(tF, 3), reductionFactor: trunk.reductionFactor,
       effectiveAmpacity: rd(eA), Z: rd(Z, 4), K,
@@ -476,6 +545,42 @@ function runTrunkCalc(trunk, agg) {
     };
   }
 
+  /* 325×2 並列試行 */
+  {
+    const sz2 = 325;
+    const bA2 = getBaseAmpacity(trunk.cableType, trunk.wiringMethod, sz2);
+    const imp2 = getImpedance(trunk.cableType, freq, sz2);
+    if (bA2 !== null && imp2) {
+      const eA2 = bA2 * 2 * tF * trunk.reductionFactor;
+      const Z2 = (imp2[0] * PF + imp2[1] * sinT) / 2;
+      const vd2 = K * totalI * (trunk.cableLength / 1000) * Z2;
+      const vdP2 = baseV > 0 ? vd2 / baseV * 100 : 0;
+      const protOK2 = hasMotor ? eA2 >= mccbAT / 2.5 : eA2 >= mccbAT;
+      if (eA2 >= sizingI && vdP2 <= allowVdP && protOK2) {
+        return {
+          ok: true, size: sz2, parallel: 2, dI: rd(totalI), totalI: rd(totalI),
+          sumIM: rd(sumIM), sumIH: rd(sumIH), hasMotor, sizingI: rd(sizingI), mccbAT,
+          baseAmpacity: bA2 * 2, tempFactor: rd(tF, 3), reductionFactor: trunk.reductionFactor,
+          effectiveAmpacity: rd(eA2), Z: rd(Z2, 4), K,
+          vd: rd(vd2), vdPercent: rd(vdP2),
+          allowVd: rd(baseV * allowVdP / 100), allowVdPercent: allowVdP,
+          ampacityOK: true, vdOK: true, protOK: true, baseV
+        };
+      }
+      return {
+        ok: false, size: sz2, parallel: 2, dI: rd(totalI), totalI: rd(totalI),
+        sumIM: rd(sumIM), sumIH: rd(sumIH), hasMotor, sizingI: rd(sizingI), mccbAT,
+        baseAmpacity: bA2 * 2, tempFactor: rd(tF, 3), reductionFactor: trunk.reductionFactor,
+        effectiveAmpacity: rd(eA2), Z: rd(Z2, 4), K,
+        vd: rd(vd2), vdPercent: rd(vdP2),
+        allowVd: rd(baseV * allowVdP / 100), allowVdPercent: allowVdP,
+        ampacityOK: eA2 >= sizingI, vdOK: vdP2 <= allowVdP,
+        protOK: hasMotor ? eA2 >= mccbAT / 2.5 : eA2 >= mccbAT, baseV
+      };
+    }
+  }
+
+  /* 全サイズ不適合（325データなし） */
   const sz = sizes[sizes.length - 1];
   const bA = getBaseAmpacity(trunk.cableType, trunk.wiringMethod, sz);
   const eA = bA !== null ? bA * tF * trunk.reductionFactor : 0;
@@ -485,7 +590,7 @@ function runTrunkCalc(trunk, agg) {
   const vdP = baseV > 0 ? vd / baseV * 100 : 0;
 
   return {
-    ok: false, size: sz, dI: rd(totalI), totalI: rd(totalI),
+    ok: false, size: sz, parallel: 1, dI: rd(totalI), totalI: rd(totalI),
     sumIM: rd(sumIM), sumIH: rd(sumIH), hasMotor, sizingI: rd(sizingI), mccbAT,
     baseAmpacity: bA || 0, tempFactor: rd(tF, 3), reductionFactor: trunk.reductionFactor,
     effectiveAmpacity: rd(eA), Z: rd(Z, 4), K,
@@ -557,8 +662,9 @@ function propagateFault(nodes, nodeId, Rcum, Xcum, Vs, allResults) {
         const imp = getImpedance(cfg.cableType, cfg.freq, childR.size);
         if (imp) {
           const Lkm = cfg.cableLength / 1000;
-          Rc = imp[0] * Lkm;
-          Xc = imp[1] * Lkm;
+          const par = childR.parallel || 1;
+          Rc = imp[0] * Lkm / par;
+          Xc = imp[1] * Lkm / par;
         }
       }
     }
@@ -569,10 +675,11 @@ function propagateFault(nodes, nodeId, Rcum, Xcum, Vs, allResults) {
 /**
  * checkWithstand — 短時間耐電流検証 (§20-6)
  */
-function checkWithstand(size_mm2, Isc3, t) {
+function checkWithstand(size_mm2, Isc3, t, parallel) {
   t = t || 0.1;
+  parallel = parallel || 1;
   const K = 134; /* Cu_XLPE: WITHSTAND.K_constants.Cu_XLPE.K */
-  const Iw = K * size_mm2 / Math.sqrt(t);
+  const Iw = K * size_mm2 * parallel / Math.sqrt(t);
   return { ok: Isc3 <= Iw, Iwithstand: rd(Iw), Isc3: rd(Isc3), K, t };
 }
 
@@ -860,7 +967,7 @@ function ResultPanel({ result, params }) {
         <div style={{ display: 'flex', gap: 16, flex: 1 }}>
           <div style={cellStyle}>
             <div style={dtStyle}>選定ケーブル</div>
-            <div style={ddStyle}>{params.cableType} {r.size} mm²</div>
+            <div style={ddStyle}>{params.cableType} {r.size}{r.parallel > 1 ? `×${r.parallel}` : ''} mm²</div>
           </div>
           <div style={cellStyle}>
             <div style={dtStyle}>MCCB 定格</div>
@@ -957,7 +1064,7 @@ function ResultPanel({ result, params }) {
             </div>
             <div style={cellStyle}>
               {r.size && (() => {
-                const wt = checkWithstand(r.size, r.Isc3, 0.1);
+                const wt = checkWithstand(r.size, r.Isc3, 0.1, r.parallel);
                 return (
                   <React.Fragment>
                     <div style={detailRow}><span>耐電流 (K=134, t=0.1s)</span><span>{rd(wt.Iwithstand / 1000, 1)} kA</span></div>
@@ -1277,7 +1384,7 @@ function TreeTable({ nodes, allResults, selectedId, onSelect, onDelete, onAddChi
             {r && r.dI != null ? `${r.dI}A` : r && r.In != null ? `${rd(r.In)}A` : '-'}
           </td>
           <td style={{ padding: '6px 4px', fontSize: 12 }}>
-            {r && r.size ? `${cType} ${r.size}` : '-'}
+            {r && r.size ? `${cType} ${r.size}${r.parallel > 1 ? '×' + r.parallel : ''}` : '-'}
           </td>
           <td style={{ padding: '6px 4px', fontSize: 12, textAlign: 'right' }}>
             {r && r.mccbAT ? `${r.mccbAT}` : '-'}
@@ -1330,7 +1437,194 @@ function TreeTable({ nodes, allResults, selectedId, onSelect, onDelete, onAddChi
 }
 
 /* === PDF GENERATION === */
-/* TODO: P5 で実装 — genPDF */
+
+/**
+ * genPDF — 電-8-1 様式の電路計算書 HTML を生成 (§15)
+ *
+ * @param {Array} nodes - 全ノード配列
+ * @param {Object} allResults - calculateAll() の結果マップ
+ * @returns {string} 完全な HTML 文字列
+ */
+function genPDF(nodes, allResults) {
+  const tree = buildTree(nodes);
+  const rows = [];
+
+  /* ツリーを再帰的に走査して行データを生成 */
+  function walkTree(node, depth) {
+    const r = allResults[node.id];
+    if (node.type === 'transformer') {
+      const tr = node.transformer || {};
+      rows.push({
+        type: 'transformer', depth,
+        trunkName: tr.name || '',
+        system: '', voltage: `${tr.primaryV || ''}/${tr.secondaryV || ''}`,
+        mccbAT: '', loadName: tr.trType || '',
+        capacity: `${tr.capacity_kVA || ''}kVA`, dI: r ? `${rd(r.In)}` : '',
+        cableLength: '', cableSpec: '', wiring: '',
+        baseAmpacity: '', reductionFactor: '', effectiveAmpacity: '',
+        K: '', cosT: '', Z: '', vd: '', allowVd: '', judge: '',
+        pctZ: tr.pctZ != null ? `%Z=${tr.pctZ}` : ''
+      });
+    } else if (node.type === 'trunk') {
+      const t = node.trunk || {};
+      const sizeStr = r ? `${r.size}${r.parallel > 1 ? '×' + r.parallel : ''}` : '';
+      rows.push({
+        type: 'trunk', depth,
+        trunkName: t.name || '',
+        system: t.system || '', voltage: t.voltage || '',
+        mccbAT: r ? r.mccbAT : '',
+        loadName: '',
+        capacity: r && r.totalI != null ? `${r.totalI}A(合計)` : '',
+        dI: r ? r.sizingI : '',
+        cableLength: t.cableLength || '',
+        cableSpec: r ? `${t.cableType} ${sizeStr}` : '',
+        wiring: t.wiringMethod ? t.wiringMethod.replace('配線', '').replace('布設', '') : '',
+        baseAmpacity: r ? r.baseAmpacity : '',
+        reductionFactor: r ? r.reductionFactor : '',
+        effectiveAmpacity: r ? r.effectiveAmpacity : '',
+        K: r ? (r.K === Math.sqrt(3) ? '√3' : r.K) : '',
+        cosT: t.powerFactor || '',
+        Z: r ? r.Z : '',
+        vd: r ? `${r.vd}V (${r.vdPercent}%)` : '',
+        allowVd: r ? `${r.allowVd}V (${r.allowVdPercent}%)` : '',
+        judge: r ? (r.ok ? 'OK' : 'NG') : ''
+      });
+    } else if (node.type === 'load') {
+      const p = node.load || {};
+      const sizeStr = r ? `${r.size}${r.parallel > 1 ? '×' + r.parallel : ''}` : '';
+      rows.push({
+        type: 'load', depth,
+        trunkName: '',
+        system: p.system || '', voltage: p.voltage || '',
+        mccbAT: r ? r.mccbAT : '',
+        loadName: p.loadName || '',
+        capacity: p.unit === 'A' ? `${p.capacity}A` : `${p.capacity}${p.unit}`,
+        dI: r ? r.dI : '',
+        cableLength: p.cableLength || '',
+        cableSpec: r ? `${p.cableType} ${sizeStr}` : '',
+        wiring: p.wiringMethod ? p.wiringMethod.replace('配線', '').replace('布設', '') : '',
+        baseAmpacity: r ? r.baseAmpacity : '',
+        reductionFactor: r ? r.reductionFactor : '',
+        effectiveAmpacity: r ? r.effectiveAmpacity : '',
+        K: r ? (r.K === Math.sqrt(3) ? '√3' : r.K) : '',
+        cosT: p.powerFactor || '',
+        Z: r ? r.Z : '',
+        vd: r ? `${r.vd}V (${r.vdPercent}%)` : '',
+        allowVd: r ? `${r.allowVd}V (${r.allowVdPercent}%)` : '',
+        judge: r ? (r.ok ? 'OK' : 'NG') : ''
+      });
+    }
+    if (node.children) {
+      for (const child of node.children) walkTree(child, depth + 1);
+    }
+  }
+  for (const root of tree) walkTree(root, 0);
+
+  /* HTML テーブル行を生成 */
+  const tbodyHtml = rows.map(row => {
+    const cls = row.type === 'trunk' ? ' class="trunk-row"'
+      : row.type === 'transformer' ? ' class="tr-row"' : '';
+    const indent = row.depth > 0 ? `padding-left:${8 + row.depth * 16}px` : '';
+    const nameStyle = indent ? ` style="${indent}"` : '';
+    return `<tr${cls}>
+      <td${nameStyle}>${esc(row.trunkName)}</td>
+      <td>${esc(String(row.system))}</td>
+      <td class="r">${esc(String(row.voltage))}</td>
+      <td class="r">${esc(String(row.mccbAT))}</td>
+      <td>${esc(row.loadName)}</td>
+      <td class="r">${esc(String(row.capacity))}</td>
+      <td class="r">${esc(String(row.dI))}</td>
+      <td class="r">${esc(String(row.cableLength))}</td>
+      <td>${esc(row.cableSpec)}</td>
+      <td>${esc(row.wiring)}</td>
+      <td class="r">${esc(String(row.baseAmpacity))}</td>
+      <td class="r">${esc(String(row.reductionFactor))}</td>
+      <td class="r">${esc(String(row.effectiveAmpacity))}</td>
+      <td class="r">${esc(String(row.K))}</td>
+      <td class="r">${esc(String(row.cosT))}</td>
+      <td class="r">${esc(String(row.Z))}</td>
+      <td class="r">${esc(row.vd)}</td>
+      <td class="r">${esc(row.allowVd)}</td>
+      <td class="r judge-${row.judge === 'OK' ? 'ok' : row.judge === 'NG' ? 'ng' : ''}">${esc(row.judge)}</td>
+    </tr>`;
+  }).join('\n');
+
+  return `<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="UTF-8">
+<title>低圧幹線ケーブル電路計算書</title>
+<style>
+@page { size: A3 landscape; margin: 8mm; }
+* { box-sizing: border-box; margin: 0; padding: 0; }
+body { font-family: 'MS Gothic', 'Hiragino Kaku Gothic ProN', monospace; font-size: 9pt; color: #000; }
+h2 { font-size: 13pt; margin-bottom: 6px; }
+table { border-collapse: collapse; width: 100%; margin-bottom: 12px; }
+th, td { border: 1px solid #333; padding: 2px 4px; font-size: 8pt; white-space: nowrap; vertical-align: middle; }
+th { background: #e8e8e8; font-weight: 700; text-align: center; }
+td.r { text-align: right; }
+.trunk-row { font-weight: 700; background: #dce6f7; }
+.tr-row { font-weight: 700; background: #e8e0f0; }
+.judge-ok { color: #006400; font-weight: 700; }
+.judge-ng { color: #c00; font-weight: 700; }
+.footer { font-size: 8pt; margin-top: 8px; line-height: 1.6; border-top: 1px solid #999; padding-top: 4px; }
+.footer dt { font-weight: 700; }
+@media print { body { -webkit-print-color-adjust: exact; print-color-adjust: exact; } }
+</style>
+</head>
+<body>
+<h2>低圧幹線ケーブル電路計算書</h2>
+<p style="font-size:8pt;margin-bottom:4px;">出力日: ${new Date().toLocaleDateString('ja-JP')}</p>
+<table>
+<thead>
+<tr>
+  <th rowspan="2">幹線番号<br>/名称</th>
+  <th rowspan="2">電気方式</th>
+  <th rowspan="2">電圧<br>[V]</th>
+  <th rowspan="2">遮断器<br>[AT]</th>
+  <th rowspan="2">負荷名称</th>
+  <th rowspan="2">負荷容量</th>
+  <th rowspan="2">設計電流<br>[A]</th>
+  <th rowspan="2">L<br>[m]</th>
+  <th colspan="5">許容電流</th>
+  <th colspan="5">電圧降下</th>
+  <th rowspan="2">判定</th>
+</tr>
+<tr>
+  <th>種別/太さ</th>
+  <th>配線</th>
+  <th>許容<br>[A]</th>
+  <th>低減率</th>
+  <th>補正後<br>[A]</th>
+  <th>K</th>
+  <th>cosθ</th>
+  <th>Z<br>[Ω/km]</th>
+  <th>e [V]<br>(%)</th>
+  <th>許容e [V]<br>(%)</th>
+</tr>
+</thead>
+<tbody>
+${tbodyHtml}
+</tbody>
+</table>
+<div class="footer">
+<dl>
+<dt>電圧降下計算式</dt>
+<dd>e = K × I × l × Z / 1000 [V]　（l: こう長 [m]）</dd>
+<dt>Z（インピーダンス）</dt>
+<dd>Z = R·cosθ + X·sinθ [Ω/km]（精密式）</dd>
+<dt>K値</dt>
+<dd>単相2線式: K=2　/　単相3線式: K=1　/　三相3線式: K=√3　/　三相4線式: K=1</dd>
+<dt>保護協調判定基準</dt>
+<dd>一般回路: 実効許容電流 ≧ MCCB定格 [AT]　/　電動機回路: 実効許容電流 ≧ AT / 2.5</dd>
+</dl>
+</div>
+</body>
+</html>`;
+}
+
+/** HTML エスケープ */
+function esc(s) { return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;'); }
 
 /* === APP === */
 function App() {
@@ -1578,7 +1872,7 @@ function App() {
 
   /* --- Export (§14) --- */
   const handleExport = () => {
-    const data = { version: 'P4', nodes, exportedAt: new Date().toISOString() };
+    const data = { version: 'P5', nodes, exportedAt: new Date().toISOString() };
     const json = JSON.stringify(data, null, 2);
     const blob = new Blob([json], { type: 'application/json' });
     const url = URL.createObjectURL(blob);
@@ -1609,11 +1903,21 @@ function App() {
           }));
           setNodes(prev => [...prev, ...imported]);
           alert(`${imported.length} ノードをインポートしました`);
+        } else if (data.records && Array.isArray(data.records)) {
+          alert('旧形式（P3）のファイルです。P4 以降の形式でエクスポートし直してください。');
         } else { alert('有効なデータが見つかりません'); }
       } catch (err) { alert('JSON の読み込みに失敗しました: ' + err.message); }
       if (fileInputRef.current) fileInputRef.current.value = '';
     };
     reader.readAsText(file);
+  };
+
+  /* --- PDF出力 (§15) --- */
+  const handlePDF = () => {
+    const html = genPDF(nodes, allResults);
+    const w = window.open('', '_blank');
+    if (w) { w.document.write(html); w.document.close(); }
+    else { alert('ポップアップがブロックされました。ブラウザの設定を確認してください。'); }
   };
 
   /* --- レンダリング --- */
@@ -1652,9 +1956,11 @@ function App() {
             cursor: nodes.length ? 'pointer' : 'not-allowed',
             opacity: nodes.length ? 1 : 0.5, fontSize: 13
           }}>Export</button>
-          <button disabled style={{
-            padding: '4px 12px', borderRadius: 4, border: '1px solid rgba(255,255,255,0.5)',
-            background: 'transparent', color: '#fff', cursor: 'not-allowed', opacity: 0.5, fontSize: 13
+          <button onClick={handlePDF} disabled={nodes.length === 0} style={{
+            padding: '4px 12px', borderRadius: 4, border: '1px solid rgba(255,255,255,0.7)',
+            background: 'transparent', color: '#fff',
+            cursor: nodes.length ? 'pointer' : 'not-allowed',
+            opacity: nodes.length ? 1 : 0.5, fontSize: 13
           }}>PDF出力</button>
         </div>
       </header>
