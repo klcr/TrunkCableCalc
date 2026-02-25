@@ -1,0 +1,32 @@
+{
+  "source": "JCS 0168-1:2016 / IEC 60364-4-43",
+  "note": "ケーブルの短時間耐電流（短絡時許容電流）。断熱条件（2秒以下）での計算式: I = K × A / √t、I²t = (K × A)²。K定数は導体材質・絶縁体種別で決まる。日本JCS規格ではXLPEの短絡時最高許容温度を230°Cとし K=134（IEC規格 250°C K=143 より保守的）",
+  "data": {
+    "K_constants": {
+      "Cu_XLPE": { "K": 134, "conductor": "銅", "insulation": "架橋ポリエチレン (XLPE)", "T1_degC": 90, "T2_degC": 230, "cableTypes": ["CV", "CVT", "CVD", "CE"] },
+      "Cu_PVC":  { "K": 97,  "conductor": "銅", "insulation": "ビニル (PVC)", "T1_degC": 60, "T2_degC": 120, "cableTypes": ["VV", "VE"] },
+      "Cu_PE":   { "K": 98,  "conductor": "銅", "insulation": "ポリエチレン (PE)", "T1_degC": 75, "T2_degC": 140, "cableTypes": ["EV", "EE"] },
+      "Cu_EP":   { "K": 140, "conductor": "銅", "insulation": "EPゴム", "T1_degC": 80, "T2_degC": 230, "cableTypes": ["PN", "PV"] },
+      "Al_XLPE": { "K": 90,  "conductor": "アルミ", "insulation": "架橋ポリエチレン (XLPE)", "T1_degC": 90, "T2_degC": 230, "cableTypes": [] },
+      "Al_PVC":  { "K": 64,  "conductor": "アルミ", "insulation": "ビニル (PVC)", "T1_degC": 60, "T2_degC": 120, "cableTypes": [] }
+    },
+    "standard_sizes_mm2": [2, 3.5, 5.5, 8, 14, 22, 38, 60, 100, 150, 200, 250, 325, 400, 500],
+    "I2t_Cu_XLPE": {
+      "2":     71824,
+      "3.5":   219961,
+      "5.5":   542989,
+      "8":     1149184,
+      "14":    3517456,
+      "22":    8690896,
+      "38":    25929424,
+      "60":    64617600,
+      "100":   179560000,
+      "150":   404010000,
+      "200":   718240000,
+      "250":   1122250000,
+      "325":   1896922500,
+      "400":   2874240000,
+      "500":   4489000000
+    }
+  }
+}

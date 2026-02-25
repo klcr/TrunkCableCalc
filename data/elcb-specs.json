@@ -1,0 +1,84 @@
+{
+  "source": "JIS C 8201-2-2:2021 / 内線規程 JEAC 8001",
+  "note": "漏電遮断器（ELCB）の感度電流・動作時間カテゴリ。地絡保護協調の判定に使用。定格漏電不動作電流は感度電流の50%（IΔno = 0.5 × IΔn）",
+  "data": {
+    "sensitivity_categories": {
+      "high": {
+        "label": "高感度形",
+        "range_mA": [0, 30],
+        "standard_values_mA": [5, 6, 10, 15, 30],
+        "purpose": "感電防止（人体保護）"
+      },
+      "medium": {
+        "label": "中感度形",
+        "range_mA": [30, 1000],
+        "standard_values_mA": [50, 100, 200, 300, 500, 1000],
+        "purpose": "漏電火災防止・幹線保護"
+      },
+      "low": {
+        "label": "低感度形",
+        "range_mA": [1000, 30000],
+        "standard_values_mA": [3000, 5000, 10000, 20000, 30000],
+        "purpose": "アーク地絡損傷保護"
+      }
+    },
+    "operating_times": {
+      "high_speed": {
+        "label": "高速形（非時延形）",
+        "at_Idn": { "max_s": 0.1 },
+        "at_2Idn": { "max_s": 0.05 },
+        "at_5Idn": { "max_s": 0.04 },
+        "at_500A": { "max_s": 0.04 }
+      },
+      "inverse_time": {
+        "label": "反限時形（非時延形）",
+        "at_Idn": { "max_s": 0.3 },
+        "at_2Idn": { "max_s": 0.15 },
+        "at_5Idn": { "max_s": 0.04 }
+      },
+      "time_delay": {
+        "label": "時延形",
+        "inertia_non_operating_s": 0.06,
+        "at_Idn":  { "min_s": 0.06, "max_s": 0.5 },
+        "at_2Idn": { "min_s": 0.06, "max_s": 0.2 },
+        "at_5Idn": { "min_s": 0.06, "max_s": 0.15 },
+        "at_10Idn": { "min_s": 0.06, "max_s": 0.15 }
+      }
+    },
+    "protection_coordination": {
+      "branch": {
+        "label": "分岐回路（末端）",
+        "sensitivity_mA": 30,
+        "type": "high_speed",
+        "purpose": "感電防止",
+        "note": "内線規程1375-2: 高感度30mA以下・高速形0.1秒以内"
+      },
+      "sub_main": {
+        "label": "分電盤主幹（中位）",
+        "sensitivity_mA_range": [100, 200],
+        "type": "time_delay",
+        "purpose": "波及停電防止・バックアップ"
+      },
+      "main": {
+        "label": "キュービクル幹線（上位）",
+        "sensitivity_mA_range": [200, 500],
+        "type": "time_delay",
+        "purpose": "漏電火災防止"
+      }
+    },
+    "tt_system_protection": {
+      "formula": "RA × IΔn ≤ 50V",
+      "touch_voltage_limit_V": 50,
+      "table": {
+        "15":   3333,
+        "30":   1667,
+        "50":   1000,
+        "100":  500,
+        "200":  250,
+        "500":  100,
+        "1000": 50
+      },
+      "note": "感度電流 [mA] → 接地抵抗上限 [Ω] の対応。TT系統で接触電圧50V以下を確保する条件"
+    }
+  }
+}
