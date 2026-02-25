@@ -78,6 +78,41 @@ function getDescendants(nodes, id) {
   return result;
 }
 
+/* --- グループユーティリティ (M2-6) --- */
+
+const GROUP_COLORS = ['#e3f2fd', '#e8f5e9', '#fff3e0', '#fce4ec', '#f3e5f5', '#e0f2f1', '#fff8e1', '#e8eaf6'];
+
+function getGroupNodes(nodes, rootNodeId) {
+  const root = nodes.find(n => n.id === rootNodeId);
+  if (!root) return [];
+  return [root, ...getDescendants(nodes, rootNodeId)];
+}
+
+function findGroupForNode(groups, nodes, nodeId) {
+  return groups.find(g => {
+    const members = getGroupNodes(nodes, g.rootNodeId);
+    return members.some(n => n.id === nodeId);
+  }) || null;
+}
+
+function autoCreateGroups(nodes, existingGroups) {
+  const roots = nodes.filter(n => !n.parentId);
+  const assignedRoots = new Set(existingGroups.map(g => g.rootNodeId));
+  const newGroups = [];
+  roots.forEach((root, i) => {
+    if (!assignedRoots.has(root.id)) {
+      const name = root.type === 'transformer'
+        ? (root.transformer?.name || 'TR-' + (existingGroups.length + newGroups.length + 1))
+        : (root.trunk?.name || 'Group-' + (existingGroups.length + newGroups.length + 1));
+      newGroups.push({
+        id: genId(), name, color: GROUP_COLORS[(existingGroups.length + newGroups.length) % GROUP_COLORS.length],
+        rootNodeId: root.id, canvas: { x: 0, y: 0, collapsed: false }
+      });
+    }
+  });
+  return newGroups;
+}
+
 function buildTree(nodes) {
   const roots = nodes.filter(n => !n.parentId).sort((a, b) => a.order - b.order);
   const attach = (node) => ({
@@ -837,6 +872,39 @@ function SvgVCB({ x, y }) {
   );
 }
 
+/* === DIAGRAM: COLLAPSED GROUP MODULE (M2-6 G5) === */
+
+function ModuleGroupCollapsed({ group, nodes, allResults, canvas, onClick }) {
+  const x = canvas.x, y = canvas.y, w = 160, h = 70;
+  const memberNodes = getGroupNodes(nodes, group.rootNodeId);
+  const trNode = memberNodes.find(n => n.type === 'transformer');
+  const trunkCount = memberNodes.filter(n => n.type === 'trunk').length;
+  const loadCount = memberNodes.filter(n => n.type === 'load').length;
+  const allOk = memberNodes.every(n => { const r = allResults[n.id]; return !r || r.ok == null || r.ok; });
+  const borderColor = group.color === '#e3f2fd' ? '#1976d2' : group.color === '#e8f5e9' ? '#4caf50' : '#ff9800';
+
+  return (
+    <g style={{ cursor: 'pointer' }} onClick={onClick}>
+      <rect x={x} y={y} width={w} height={h} rx={8} fill={group.color} stroke={borderColor} strokeWidth={2} />
+      <text x={x + w / 2} y={y + 16} fontSize={12} textAnchor="middle" fontWeight={700} fill="#333">{group.name}</text>
+      {trNode && <text x={x + w / 2} y={y + 30} fontSize={9} textAnchor="middle" fill="#666">
+        {trNode.transformer?.capacity_kVA || ''}kVA {trNode.transformer?.secondaryV || ''}V
+      </text>}
+      <text x={x + w / 2} y={y + 44} fontSize={9} textAnchor="middle" fill="#888">
+        {trunkCount}幹線 {loadCount}回路
+      </text>
+      <g>
+        <rect x={x + w / 2 - 14} y={y + h - 18} width={28} height={14} rx={3}
+          fill={allOk ? '#e8f5e9' : '#ffebee'} stroke={allOk ? '#4caf50' : '#c00'} strokeWidth={0.8} />
+        <text x={x + w / 2} y={y + h - 8} fontSize={8} textAnchor="middle" fontWeight={700}
+          fill={allOk ? '#2e7d32' : '#c00'}>{allOk ? 'OK' : 'NG'}</text>
+      </g>
+      {/* 展開ボタン */}
+      <text x={x + w - 12} y={y + 14} fontSize={14} fill={borderColor} style={{ cursor: 'pointer' }}>+</text>
+    </g>
+  );
+}
+
 /* === DIAGRAM: AUTO LAYOUT (M2-4-8) === */
 
 function autoLayout(nodes, direction) {
@@ -1081,7 +1149,7 @@ function ModuleLoadNode({ node, result, canvas, selected, mode, direction, onMou
 
 /* === DIAGRAM: CANVAS COMPONENT (M2-4-1, M2-4-5, M2-4-6) === */
 
-function DiagramCanvas({ nodes, allResults, systemMeta, selectedId, onSelectNode, mode, onNodesChange }) {
+function DiagramCanvas({ nodes, allResults, systemMeta, selectedId, onSelectNode, mode, onNodesChange, groups, crossLinks, onToggleGroupCollapse }) {
   const direction = (systemMeta && systemMeta.diagramDirection) || 'horizontal';
   const svgRef = React.useRef(null);
   const [vt, setVt] = React.useState({ x: 0, y: 0, scale: 1 });
@@ -1232,11 +1300,11 @@ function DiagramCanvas({ nodes, allResults, systemMeta, selectedId, onSelectNode
     });
   };
 
-  /* 接続線の描画 */
+  /* 接続線の描画 (M2-6: 折りたたみグループのノード接続を非表示) */
   const renderConnections = () => {
     const lines = [];
     for (const node of nodes) {
-      if (!node.parentId || !node.canvas) continue;
+      if (!node.parentId || !node.canvas || collapsedNodeIds.has(node.id)) continue;
       const parent = nodes.find(n => n.id === node.parentId);
       if (!parent || !parent.canvas) continue;
       const r = allResults[node.id];
@@ -1251,9 +1319,9 @@ function DiagramCanvas({ nodes, allResults, systemMeta, selectedId, onSelectNode
     return lines;
   };
 
-  /* モジュール描画 */
+  /* モジュール描画 (M2-6: 折りたたみグループのノードを非表示) */
   const renderModules = () => {
-    return nodes.filter(n => n.canvas).map(node => {
+    return nodes.filter(n => n.canvas && !collapsedNodeIds.has(n.id)).map(node => {
       const r = allResults[node.id];
       const sel = selectedId === node.id;
       const common = {
@@ -1288,6 +1356,101 @@ function DiagramCanvas({ nodes, allResults, systemMeta, selectedId, onSelectNode
     return <line x1={fx} y1={fy} x2={wiring.mx} y2={wiring.my} stroke="#1976d2" strokeWidth={2} strokeDasharray="4 2" />;
   };
 
+  /* M2-6: 折りたたみグループの所属ノードIDセット */
+  const collapsedNodeIds = React.useMemo(() => {
+    const grps = groups || [];
+    const ids = new Set();
+    grps.filter(g => g.canvas.collapsed).forEach(g => {
+      getGroupNodes(nodes, g.rootNodeId).forEach(n => ids.add(n.id));
+    });
+    return ids;
+  }, [groups, nodes]);
+
+  /* M2-6: グループ描画（展開=背景枠、折りたたみ=サマリーボックス） */
+  const renderGroupContainers = () => {
+    const grps = groups || [];
+    const elements = [];
+    grps.forEach(grp => {
+      const memberNodes = getGroupNodes(nodes, grp.rootNodeId).filter(n => n.canvas);
+      if (memberNodes.length === 0) return;
+
+      if (grp.canvas.collapsed) {
+        /* 折りたたみ: サマリーボックス */
+        let cx = 0, cy = 0;
+        memberNodes.forEach(n => { cx += n.canvas.x; cy += n.canvas.y; });
+        cx /= memberNodes.length; cy /= memberNodes.length;
+        const canvasPos = { x: grp.canvas.x || cx, y: grp.canvas.y || cy };
+        elements.push(
+          <ModuleGroupCollapsed key={'grp-col-' + grp.id}
+            group={grp} nodes={nodes} allResults={allResults}
+            canvas={canvasPos}
+            onClick={() => onToggleGroupCollapse && onToggleGroupCollapse(grp.id)}
+          />
+        );
+      } else {
+        /* 展開: 背景枠 */
+        const pad = 15;
+        let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
+        for (const n of memberNodes) {
+          minX = Math.min(minX, n.canvas.x);
+          minY = Math.min(minY, n.canvas.y);
+          maxX = Math.max(maxX, n.canvas.x + n.canvas.width);
+          maxY = Math.max(maxY, n.canvas.y + n.canvas.height);
+        }
+        if (minX === Infinity) return;
+        const borderColor = grp.color === '#e3f2fd' ? '#90caf9' : grp.color === '#e8f5e9' ? '#a5d6a7' : grp.color === '#fff3e0' ? '#ffcc80' : '#bbb';
+        elements.push(
+          <g key={'grp-bg-' + grp.id}>
+            <rect x={minX - pad} y={minY - pad - 16} width={maxX - minX + pad * 2} height={maxY - minY + pad * 2 + 16}
+              rx={8} fill={grp.color} fillOpacity={0.35} stroke={borderColor} strokeWidth={1.5} strokeDasharray="6 3" />
+            <text x={minX - pad + 6} y={minY - pad - 3} fontSize={11} fontWeight={700} fill={borderColor}>{grp.name}</text>
+          </g>
+        );
+      }
+    });
+    return elements;
+  };
+
+  /* M2-6: クロスリンク描画 */
+  const renderCrossLinks = () => {
+    const grps = groups || [];
+    const links = crossLinks || [];
+    return links.map(cl => {
+      const fromGrp = grps.find(g => g.id === cl.fromGroupId);
+      const toGrp = grps.find(g => g.id === cl.toGroupId);
+      if (!fromGrp || !toGrp) return null;
+      /* グループの重心を計算 */
+      const getCentroid = (grp) => {
+        const members = getGroupNodes(nodes, grp.rootNodeId).filter(n => n.canvas);
+        if (members.length === 0) return null;
+        const cx = members.reduce((s, n) => s + n.canvas.x + n.canvas.width / 2, 0) / members.length;
+        const cy = members.reduce((s, n) => s + n.canvas.y + n.canvas.height / 2, 0) / members.length;
+        const maxX = Math.max(...members.map(n => n.canvas.x + n.canvas.width));
+        const minX = Math.min(...members.map(n => n.canvas.x));
+        return { cx, cy, maxX, minX };
+      };
+      const from = getCentroid(fromGrp);
+      const to = getCentroid(toGrp);
+      if (!from || !to) return null;
+      const fx = from.maxX + 10, fy = from.cy;
+      const tx = to.minX - 10, ty = to.cy;
+      const mx = (fx + tx) / 2;
+      const dashPattern = cl.lineStyle === 'dotted' ? '2 4' : cl.lineStyle === 'solid' ? '' : '8 4';
+      const color = cl.color || '#ff9800';
+      return (
+        <g key={'cl-' + cl.id}>
+          <path d={`M${fx},${fy} C${mx},${fy} ${mx},${ty} ${tx},${ty}`}
+            fill="none" stroke={color} strokeWidth={2} strokeDasharray={dashPattern} />
+          {cl.label && (
+            <text x={mx} y={(fy + ty) / 2 - 6} fontSize={9} textAnchor="middle" fill={color} fontWeight={600}>
+              {cl.label}
+            </text>
+          )}
+        </g>
+      );
+    });
+  };
+
   return (
     <div style={{ width: '100%', height: '100%', position: 'relative', background: '#f8f9fa', overflow: 'hidden' }}>
       <svg ref={svgRef} width="100%" height="100%"
@@ -1306,7 +1469,9 @@ function DiagramCanvas({ nodes, allResults, systemMeta, selectedId, onSelectNode
           </defs>
         )}
         <g transform={`translate(${vt.x},${vt.y}) scale(${vt.scale})`}>
+          {renderGroupContainers()}
           {renderConnections()}
+          {renderCrossLinks()}
           {renderModules()}
           {renderWiringLine()}
         </g>
@@ -1329,6 +1494,54 @@ function DiagramCanvas({ nodes, allResults, systemMeta, selectedId, onSelectNode
 }
 
 /* === COMPONENTS === */
+
+/* --- M2-6: 出力ドロップダウン --- */
+function OutputDropdown({ label, disabled, groups, onAll, onGroup }) {
+  const [open, setOpen] = React.useState(false);
+  const ref = React.useRef(null);
+  React.useEffect(() => {
+    if (!open) return;
+    const close = (e) => { if (ref.current && !ref.current.contains(e.target)) setOpen(false); };
+    document.addEventListener('mousedown', close);
+    return () => document.removeEventListener('mousedown', close);
+  }, [open]);
+  const hasGroups = groups && groups.length > 1;
+  const btnStyle = {
+    padding: '4px 12px', borderRadius: 4, border: '1px solid rgba(255,255,255,0.7)',
+    background: 'transparent', color: '#fff',
+    cursor: disabled ? 'not-allowed' : 'pointer',
+    opacity: disabled ? 0.5 : 1, fontSize: 13
+  };
+  if (!hasGroups) return <button onClick={onAll} disabled={disabled} style={btnStyle}>{label}</button>;
+  return (
+    <div ref={ref} style={{ position: 'relative', display: 'inline-block' }}>
+      <button onClick={() => !disabled && setOpen(!open)} disabled={disabled} style={btnStyle}>{label} ▾</button>
+      {open && (
+        <div style={{
+          position: 'absolute', top: '100%', right: 0, marginTop: 4, minWidth: 160,
+          background: '#fff', borderRadius: 6, boxShadow: '0 4px 12px rgba(0,0,0,0.2)',
+          zIndex: 1000, overflow: 'hidden'
+        }}>
+          <div onClick={() => { onAll(); setOpen(false); }}
+            style={{ padding: '8px 12px', fontSize: 12, cursor: 'pointer', borderBottom: '1px solid #eee', fontWeight: 600 }}
+            onMouseEnter={e => e.target.style.background = '#f5f5f5'}
+            onMouseLeave={e => e.target.style.background = '#fff'}>
+            全体（結合出力）
+          </div>
+          {groups.map(g => (
+            <div key={g.id} onClick={() => { onGroup(g.id); setOpen(false); }}
+              style={{ padding: '8px 12px', fontSize: 12, cursor: 'pointer', display: 'flex', alignItems: 'center', gap: 6 }}
+              onMouseEnter={e => e.target.style.background = '#f5f5f5'}
+              onMouseLeave={e => e.target.style.background = '#fff'}>
+              <span style={{ width: 10, height: 10, borderRadius: 2, background: g.color, border: '1px solid #ccc', flexShrink: 0 }}></span>
+              {g.name}
+            </div>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
 
 /* --- 電気方式 → 電圧選択肢 (§5) --- */
 const VOLTAGE_OPTIONS = {
@@ -1935,7 +2148,9 @@ function TrunkForm({ trunkParams, setTrunkParams, onSave, onCancel, isEdit, chil
 }
 
 /* --- TreeTable 登録一覧ツリー表示 (§12) --- */
-function TreeTable({ nodes, allResults, selectedId, onSelect, onDelete, onAddChild }) {
+function TreeTable({ nodes, allResults, selectedId, onSelect, onDelete, onAddChild, groups, crossLinks, onToggleGroupCollapse }) {
+  const [collapsedGroups, setCollapsedGroups] = React.useState({});
+
   if (nodes.length === 0) return (
     <div style={{ color: '#999', padding: 16, fontSize: 13 }}>
       変圧器または負荷回路を登録してください
@@ -1943,6 +2158,23 @@ function TreeTable({ nodes, allResults, selectedId, onSelect, onDelete, onAddChi
   );
 
   const tree = buildTree(nodes);
+  const grps = groups || [];
+  const links = crossLinks || [];
+
+  /* グループごとにルートノードを分類 */
+  const groupedRoots = new Map();
+  const ungroupedRoots = [];
+  tree.forEach(root => {
+    const grp = grps.find(g => g.rootNodeId === root.id);
+    if (grp) {
+      if (!groupedRoots.has(grp.id)) groupedRoots.set(grp.id, { group: grp, roots: [] });
+      groupedRoots.get(grp.id).roots.push(root);
+    } else {
+      ungroupedRoots.push(root);
+    }
+  });
+
+  const toggleCollapse = (grpId) => setCollapsedGroups(prev => ({ ...prev, [grpId]: !prev[grpId] }));
 
   const renderNode = (node, depth) => {
     const r = allResults[node.id];
@@ -2005,6 +2237,63 @@ function TreeTable({ nodes, allResults, selectedId, onSelect, onDelete, onAddChi
     );
   };
 
+  const renderGroupHeader = (grp) => {
+    const isCollapsed = collapsedGroups[grp.id];
+    const memberNodes = getGroupNodes(nodes, grp.rootNodeId);
+    const circuitCount = memberNodes.filter(n => n.type === 'load').length;
+    const trunkCount = memberNodes.filter(n => n.type === 'trunk').length;
+    /* グループ全体の判定サマリー */
+    const allOk = memberNodes.every(n => {
+      const r = allResults[n.id];
+      return !r || r.ok == null || r.ok;
+    });
+    /* このグループに接続されているクロスリンク */
+    const incomingLinks = links.filter(cl => cl.toGroupId === grp.id);
+    const outgoingLinks = links.filter(cl => cl.fromGroupId === grp.id);
+
+    return (
+      <React.Fragment key={'grp-' + grp.id}>
+        <tr onClick={() => toggleCollapse(grp.id)}
+          style={{ background: grp.color || '#e3f2fd', cursor: 'pointer', borderBottom: '2px solid #bbb', borderTop: '2px solid #bbb' }}>
+          <td colSpan={7} style={{ padding: '8px 8px', fontSize: 13, fontWeight: 700 }}>
+            <span style={{ marginRight: 8, fontSize: 10, color: '#666' }}>{isCollapsed ? '▶' : '▼'}</span>
+            {grp.name}
+            <span style={{ marginLeft: 12, fontSize: 11, fontWeight: 400, color: '#666' }}>
+              ({trunkCount}幹線 {circuitCount}回路)
+            </span>
+          </td>
+          <td style={{ padding: '6px 4px', fontSize: 12 }}>
+            {memberNodes.length > 0 && <Badge ok={allOk} label={allOk ? 'OK' : 'NG'} />}
+          </td>
+          <td style={{ padding: '6px 2px' }}></td>
+        </tr>
+        {/* クロスリンク表示 */}
+        {incomingLinks.map(cl => {
+          const fromGrp = grps.find(g => g.id === cl.fromGroupId);
+          return (
+            <tr key={'cl-in-' + cl.id} style={{ background: '#fffde7', borderBottom: '1px solid #eee' }}>
+              <td colSpan={9} style={{ padding: '3px 8px 3px 28px', fontSize: 11, color: '#795548' }}>
+                ← {fromGrp?.name || '?'} から{cl.linkType === 'emergency' ? '非常用' : cl.linkType === 'backup' ? 'バックアップ' : cl.linkType === 'tie' ? '連絡' : ''}給電
+                {cl.label ? ` (${cl.label})` : ''}
+              </td>
+            </tr>
+          );
+        })}
+        {outgoingLinks.map(cl => {
+          const toGrp = grps.find(g => g.id === cl.toGroupId);
+          return (
+            <tr key={'cl-out-' + cl.id} style={{ background: '#fff8e1', borderBottom: '1px solid #eee' }}>
+              <td colSpan={9} style={{ padding: '3px 8px 3px 28px', fontSize: 11, color: '#795548' }}>
+                → {toGrp?.name || '?'} へ{cl.linkType === 'emergency' ? '非常用' : cl.linkType === 'backup' ? 'バックアップ' : cl.linkType === 'tie' ? '連絡' : ''}給電
+                {cl.label ? ` (${cl.label})` : ''}
+              </td>
+            </tr>
+          );
+        })}
+      </React.Fragment>
+    );
+  };
+
   return (
     <div style={{ overflowX: 'auto' }}>
       <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: 13 }}>
@@ -2022,9 +2311,182 @@ function TreeTable({ nodes, allResults, selectedId, onSelect, onDelete, onAddChi
           </tr>
         </thead>
         <tbody>
-          {tree.map(node => renderNode(node, 0))}
+          {/* グループ化されたルートノード */}
+          {Array.from(groupedRoots.values()).map(({ group: grp, roots }) => (
+            <React.Fragment key={'grpsec-' + grp.id}>
+              {renderGroupHeader(grp)}
+              {!collapsedGroups[grp.id] && roots.map(node => renderNode(node, 0))}
+            </React.Fragment>
+          ))}
+          {/* 未分類のルートノード */}
+          {ungroupedRoots.length > 0 && grps.length > 0 && (
+            <tr style={{ background: '#f5f5f5', borderBottom: '1px solid #ccc', borderTop: '2px solid #bbb' }}>
+              <td colSpan={9} style={{ padding: '6px 8px', fontSize: 12, fontWeight: 600, color: '#999' }}>
+                未分類
+              </td>
+            </tr>
+          )}
+          {ungroupedRoots.map(node => renderNode(node, 0))}
         </tbody>
       </table>
+    </div>
+  );
+}
+
+/* === PDF GENERATION === */
+
+/* === GROUP EDITOR (M2-6) === */
+
+function GroupEditor({ groups, nodes, allResults, crossLinks, onUpdateGroup, onRemoveGroup, onAutoGroupAll, onAddCrossLink, onRemoveCrossLink }) {
+  const [editingId, setEditingId] = React.useState(null);
+  const [editName, setEditName] = React.useState('');
+  const [editColor, setEditColor] = React.useState('');
+  /* クロスリンク追加UI */
+  const [showLinkForm, setShowLinkForm] = React.useState(false);
+  const [linkFrom, setLinkFrom] = React.useState('');
+  const [linkTo, setLinkTo] = React.useState('');
+  const [linkType, setLinkType] = React.useState('tie');
+  const [linkLabel, setLinkLabel] = React.useState('');
+
+  const startEdit = (grp) => { setEditingId(grp.id); setEditName(grp.name); setEditColor(grp.color); };
+  const saveEdit = () => {
+    if (editingId && editName.trim()) {
+      onUpdateGroup(editingId, { name: editName.trim(), color: editColor });
+      setEditingId(null);
+    }
+  };
+  const addLink = () => {
+    if (linkFrom && linkTo && linkFrom !== linkTo) {
+      onAddCrossLink({ fromGroupId: linkFrom, toGroupId: linkTo, linkType, label: linkLabel, fromNodeId: null, toNodeId: null });
+      setShowLinkForm(false); setLinkFrom(''); setLinkTo(''); setLinkLabel(''); setLinkType('tie');
+    }
+  };
+
+  const selStyle = { padding: '4px 8px', borderRadius: 4, border: '1px solid #ccc', fontSize: 12, width: '100%' };
+  const btnSmall = { border: 'none', background: 'none', cursor: 'pointer', fontSize: 12, padding: '2px 6px' };
+
+  return (
+    <div style={{ padding: 8 }}>
+      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 12 }}>
+        <span style={{ fontWeight: 700, fontSize: 14 }}>グループ一覧</span>
+        <button onClick={onAutoGroupAll} style={{ padding: '4px 10px', borderRadius: 4, border: '1px solid #ccc', fontSize: 11, cursor: 'pointer', background: '#fff' }}>
+          全自動グループ化
+        </button>
+      </div>
+
+      {groups.length === 0 && (
+        <div style={{ color: '#999', fontSize: 12, padding: 8 }}>
+          グループがありません。変圧器を追加すると自動で作成されます。
+        </div>
+      )}
+
+      {groups.map(grp => {
+        const memberNodes = getGroupNodes(nodes, grp.rootNodeId);
+        const circuitCount = memberNodes.filter(n => n.type === 'load').length;
+        const trunkCount = memberNodes.filter(n => n.type === 'trunk').length;
+        const isEditing = editingId === grp.id;
+
+        return (
+          <div key={grp.id} style={{
+            border: '1px solid #ddd', borderRadius: 6, padding: 10, marginBottom: 8,
+            borderLeft: `4px solid ${grp.color === '#e3f2fd' ? '#1976d2' : grp.color}`,
+            background: '#fff'
+          }}>
+            {isEditing ? (
+              <div>
+                <input value={editName} onChange={e => setEditName(e.target.value)}
+                  style={{ ...selStyle, marginBottom: 6, fontWeight: 600 }} autoFocus />
+                <div style={{ display: 'flex', gap: 4, alignItems: 'center', marginBottom: 6 }}>
+                  <span style={{ fontSize: 11, color: '#666' }}>色:</span>
+                  {GROUP_COLORS.map(c => (
+                    <div key={c} onClick={() => setEditColor(c)}
+                      style={{ width: 20, height: 20, borderRadius: 3, background: c, cursor: 'pointer',
+                        border: editColor === c ? '2px solid #333' : '1px solid #ccc' }} />
+                  ))}
+                </div>
+                <div style={{ display: 'flex', gap: 6 }}>
+                  <button onClick={saveEdit} style={{ ...btnSmall, color: '#1976d2', fontWeight: 700 }}>保存</button>
+                  <button onClick={() => setEditingId(null)} style={{ ...btnSmall, color: '#999' }}>取消</button>
+                </div>
+              </div>
+            ) : (
+              <div>
+                <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+                  <span style={{ fontWeight: 600, fontSize: 13 }}>{grp.name}</span>
+                  <div>
+                    <button onClick={() => startEdit(grp)} style={{ ...btnSmall, color: '#1976d2' }}>編集</button>
+                    <button onClick={() => onRemoveGroup(grp.id)} style={{ ...btnSmall, color: '#f44336' }}>削除</button>
+                  </div>
+                </div>
+                <div style={{ fontSize: 11, color: '#666', marginTop: 4 }}>
+                  {trunkCount}幹線 · {circuitCount}回路 · {memberNodes.length}ノード
+                </div>
+              </div>
+            )}
+          </div>
+        );
+      })}
+
+      {/* クロスリンク管理 */}
+      <div style={{ marginTop: 16, borderTop: '1px solid #eee', paddingTop: 12 }}>
+        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 8 }}>
+          <span style={{ fontWeight: 700, fontSize: 13 }}>グループ間接続</span>
+          <button onClick={() => setShowLinkForm(!showLinkForm)} style={{ padding: '3px 8px', borderRadius: 4, border: '1px solid #ccc', fontSize: 11, cursor: 'pointer', background: '#fff' }}>
+            {showLinkForm ? '取消' : '+ 接続追加'}
+          </button>
+        </div>
+
+        {showLinkForm && groups.length >= 2 && (
+          <div style={{ border: '1px solid #ddd', borderRadius: 6, padding: 10, marginBottom: 8, background: '#fafafa' }}>
+            <div style={{ marginBottom: 6 }}>
+              <label style={{ fontSize: 11, color: '#666' }}>送り側:</label>
+              <select value={linkFrom} onChange={e => setLinkFrom(e.target.value)} style={selStyle}>
+                <option value="">選択</option>
+                {groups.map(g => <option key={g.id} value={g.id}>{g.name}</option>)}
+              </select>
+            </div>
+            <div style={{ marginBottom: 6 }}>
+              <label style={{ fontSize: 11, color: '#666' }}>受け側:</label>
+              <select value={linkTo} onChange={e => setLinkTo(e.target.value)} style={selStyle}>
+                <option value="">選択</option>
+                {groups.filter(g => g.id !== linkFrom).map(g => <option key={g.id} value={g.id}>{g.name}</option>)}
+              </select>
+            </div>
+            <div style={{ marginBottom: 6 }}>
+              <label style={{ fontSize: 11, color: '#666' }}>接続タイプ:</label>
+              <select value={linkType} onChange={e => setLinkType(e.target.value)} style={selStyle}>
+                <option value="tie">連絡線</option>
+                <option value="emergency">非常用</option>
+                <option value="backup">バックアップ</option>
+                <option value="custom">カスタム</option>
+              </select>
+            </div>
+            <div style={{ marginBottom: 6 }}>
+              <label style={{ fontSize: 11, color: '#666' }}>ラベル:</label>
+              <input value={linkLabel} onChange={e => setLinkLabel(e.target.value)} placeholder="任意" style={selStyle} />
+            </div>
+            <button onClick={addLink} disabled={!linkFrom || !linkTo || linkFrom === linkTo}
+              style={{ width: '100%', padding: '6px', borderRadius: 4, border: 'none',
+                background: linkFrom && linkTo && linkFrom !== linkTo ? '#1976d2' : '#e0e0e0',
+                color: '#fff', fontSize: 12, fontWeight: 600, cursor: 'pointer' }}>追加</button>
+          </div>
+        )}
+
+        {crossLinks && crossLinks.length > 0 ? crossLinks.map(cl => {
+          const from = groups.find(g => g.id === cl.fromGroupId);
+          const to = groups.find(g => g.id === cl.toGroupId);
+          const typeLabel = cl.linkType === 'emergency' ? '非常用' : cl.linkType === 'backup' ? 'バックアップ' : cl.linkType === 'tie' ? '連絡線' : cl.linkType || '';
+          return (
+            <div key={cl.id} style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center',
+              fontSize: 12, padding: '4px 8px', border: '1px solid #eee', borderRadius: 4, marginBottom: 4, background: '#fff' }}>
+              <span>{from?.name || '?'} → {to?.name || '?'} ({typeLabel}{cl.label ? `: ${cl.label}` : ''})</span>
+              <button onClick={() => onRemoveCrossLink(cl.id)} style={{ ...btnSmall, color: '#f44336' }}>×</button>
+            </div>
+          );
+        }) : (
+          <div style={{ color: '#999', fontSize: 11, padding: 4 }}>接続なし</div>
+        )}
+      </div>
     </div>
   );
 }
@@ -2421,6 +2883,10 @@ function App() {
   const [rightPaneView, setRightPaneView] = React.useState('table'); /* 'table' | 'diagram' | 'split' */
   const [diagramMode, setDiagramMode] = React.useState('edit'); /* 'edit' | 'view' */
 
+  /* --- M2-6: グループ管理ステート --- */
+  const [groups, setGroups] = React.useState([]);
+  const [crossLinks, setCrossLinks] = React.useState([]);
+
   /* --- 計算結果（フォームプレビュー用） --- */
   const result = React.useMemo(() => {
     if (editMode !== 'load' || params.capacity <= 0) return null;
@@ -2576,8 +3042,8 @@ function App() {
 
   /* --- CRUD: ノード削除 --- */
   const handleDeleteNode = (id) => {
+    const target = nodes.find(n => n.id === id);
     setNodes(prev => {
-      const target = prev.find(n => n.id === id);
       let updated = removeNode(prev, id);
       /* §13: load 削除後に親 trunk の子が 0 件なら trunk も自動削除 */
       if (target && target.type === 'load' && target.parentId) {
@@ -2588,6 +3054,12 @@ function App() {
       }
       return updated;
     });
+    /* M2-6: ルートノード削除時にグループとクロスリンクを連動削除 */
+    const grp = groups.find(g => g.rootNodeId === id);
+    if (grp) {
+      setCrossLinks(prev => prev.filter(cl => cl.fromGroupId !== grp.id && cl.toGroupId !== grp.id));
+      setGroups(prev => prev.filter(g => g.id !== grp.id));
+    }
     if (selectedId === id) resetToNewLoad();
   };
 
@@ -2595,16 +3067,30 @@ function App() {
   const handleSaveTransformer = () => {
     if (selectedId && selectedNode?.type === 'transformer') {
       handleUpdateNode();
+      /* M2-6: グループ名も同期更新 */
+      const grp = groups.find(g => g.rootNodeId === selectedId);
+      if (grp && trParams.name && grp.name !== trParams.name) {
+        setGroups(prev => prev.map(g => g.id === grp.id ? { ...g, name: trParams.name } : g));
+      }
     } else {
+      const newId = genId();
       setNodes(prev => {
         const trCount = prev.filter(n => n.type === 'transformer').length;
         return addNode(prev, {
-          id: genId(), type: 'transformer', parentId: null,
+          id: newId, type: 'transformer', parentId: null,
           order: trCount, ts: new Date().toISOString(), externalRef: null,
           transformer: { ...trParams },
           canvas: null /* 自動配置で割り当て */
         });
       });
+      /* M2-6: 変圧器追加時にグループを自動作成 */
+      setGroups(prev => [...prev, {
+        id: genId(),
+        name: trParams.name || 'TR-' + (prev.length + 1),
+        color: GROUP_COLORS[prev.length % GROUP_COLORS.length],
+        rootNodeId: newId,
+        canvas: { x: 0, y: 0, collapsed: false }
+      }]);
       resetToNewLoad();
     }
   };
@@ -2658,9 +3144,9 @@ function App() {
     }
   };
 
-  /* --- Export (§14, M2-1-4: スキーマ拡張) --- */
+  /* --- Export (§14, M2-6: M2G スキーマ) --- */
   const handleExport = () => {
-    const data = { version: 'M2', nodes, systemMeta, exportedAt: new Date().toISOString() };
+    const data = { version: 'M2G', nodes, groups, crossLinks, systemMeta, exportedAt: new Date().toISOString() };
     const json = JSON.stringify(data, null, 2);
     const blob = new Blob([json], { type: 'application/json' });
     const url = URL.createObjectURL(blob);
@@ -2671,7 +3157,7 @@ function App() {
     URL.revokeObjectURL(url);
   };
 
-  /* --- Import (§14) --- */
+  /* --- Import (§14, M2-6: M2G 対応) --- */
   const handleImport = (e) => {
     const file = e.target.files[0];
     if (!file) return;
@@ -2685,14 +3171,37 @@ function App() {
           const imported = data.nodes.map(n => {
             let newId = n.id;
             if (existingIds.has(n.id)) { newId = genId(); idMap[n.id] = newId; }
-            /* P5 形式は canvas フィールドがないため null で補完 */
             return { ...n, id: newId, canvas: n.canvas || null };
           }).map(n => ({
             ...n, parentId: n.parentId ? (idMap[n.parentId] || n.parentId) : null
           }));
           setNodes(prev => [...prev, ...imported]);
-          /* M2: systemMeta の復元 */
           if (data.systemMeta) setSystemMeta(prev => ({ ...prev, ...data.systemMeta }));
+
+          /* M2-6: グループとクロスリンクの復元 */
+          if (data.version === 'M2G' && data.groups) {
+            const grpIdMap = {};
+            const importedGroups = data.groups.map(g => {
+              const newGrpId = genId();
+              grpIdMap[g.id] = newGrpId;
+              return { ...g, id: newGrpId, rootNodeId: idMap[g.rootNodeId] || g.rootNodeId };
+            });
+            setGroups(prev => [...prev, ...importedGroups]);
+            if (data.crossLinks && Array.isArray(data.crossLinks)) {
+              const importedLinks = data.crossLinks.map(cl => ({
+                ...cl, id: genId(),
+                fromGroupId: grpIdMap[cl.fromGroupId] || cl.fromGroupId,
+                toGroupId: grpIdMap[cl.toGroupId] || cl.toGroupId,
+                fromNodeId: cl.fromNodeId ? (idMap[cl.fromNodeId] || cl.fromNodeId) : null,
+                toNodeId: cl.toNodeId ? (idMap[cl.toNodeId] || cl.toNodeId) : null
+              }));
+              setCrossLinks(prev => [...prev, ...importedLinks]);
+            }
+          } else {
+            /* M2/P5 形式: ルートノードからグループを自動生成 */
+            setGroups(prev => [...prev, ...autoCreateGroups(imported, prev)]);
+          }
+
           alert(`${imported.length} ノードをインポートしました`);
         } else if (data.records && Array.isArray(data.records)) {
           alert('旧形式（P3）のファイルです。P4 以降の形式でエクスポートし直してください。');
@@ -2703,17 +3212,70 @@ function App() {
     reader.readAsText(file);
   };
 
-  /* --- PDF出力 (§15) --- */
-  const handlePDF = () => {
-    const html = genPDF(nodes, allResults);
+  /* --- M2-6: グループ CRUD ハンドラ --- */
+  const handleAddGroup = (rootNodeId, name) => {
+    if (groups.some(g => g.rootNodeId === rootNodeId)) return; /* 重複防止 */
+    setGroups(prev => [...prev, {
+      id: genId(), name: name || 'Group-' + (prev.length + 1),
+      color: GROUP_COLORS[prev.length % GROUP_COLORS.length],
+      rootNodeId, canvas: { x: 0, y: 0, collapsed: false }
+    }]);
+  };
+
+  const handleUpdateGroup = (groupId, patch) => {
+    setGroups(prev => prev.map(g => g.id === groupId ? { ...g, ...patch, id: g.id, rootNodeId: g.rootNodeId } : g));
+  };
+
+  const handleRemoveGroup = (groupId) => {
+    setCrossLinks(prev => prev.filter(cl => cl.fromGroupId !== groupId && cl.toGroupId !== groupId));
+    setGroups(prev => prev.filter(g => g.id !== groupId));
+  };
+
+  const handleAutoGroupAll = () => {
+    const newGroups = autoCreateGroups(nodes, groups);
+    if (newGroups.length > 0) setGroups(prev => [...prev, ...newGroups]);
+  };
+
+  const handleToggleGroupCollapse = (groupId) => {
+    setGroups(prev => prev.map(g =>
+      g.id === groupId ? { ...g, canvas: { ...g.canvas, collapsed: !g.canvas.collapsed } } : g
+    ));
+  };
+
+  /* --- M2-6: クロスリンク CRUD ハンドラ --- */
+  const handleAddCrossLink = (link) => {
+    setCrossLinks(prev => [...prev, { id: genId(), lineStyle: 'dashed', color: '#ff9800', ...link }]);
+  };
+
+  const handleUpdateCrossLink = (linkId, patch) => {
+    setCrossLinks(prev => prev.map(cl => cl.id === linkId ? { ...cl, ...patch, id: cl.id } : cl));
+  };
+
+  const handleRemoveCrossLink = (linkId) => {
+    setCrossLinks(prev => prev.filter(cl => cl.id !== linkId));
+  };
+
+  /* --- PDF出力 (§15, M2-6: グループフィルタ対応) --- */
+  const handlePDF = (groupId) => {
+    let filteredNodes = nodes;
+    if (groupId) {
+      const grp = groups.find(g => g.id === groupId);
+      if (grp) filteredNodes = getGroupNodes(nodes, grp.rootNodeId);
+    }
+    const html = genPDF(filteredNodes, allResults);
     const w = window.open('', '_blank');
     if (w) { w.document.write(html); w.document.close(); }
     else { alert('ポップアップがブロックされました。ブラウザの設定を確認してください。'); }
   };
 
-  /* --- M2-5: 系統図出力 --- */
-  const handleDiagramOutput = () => {
-    const html = genDiagramHTML(nodes, allResults, systemMeta);
+  /* --- M2-5: 系統図出力 (M2-6: グループフィルタ対応) --- */
+  const handleDiagramOutput = (groupId) => {
+    let filteredNodes = nodes;
+    if (groupId) {
+      const grp = groups.find(g => g.id === groupId);
+      if (grp) filteredNodes = getGroupNodes(nodes, grp.rootNodeId);
+    }
+    const html = genDiagramHTML(filteredNodes, allResults, systemMeta);
     const w = window.open('', '_blank');
     if (w) { w.document.write(html); w.document.close(); }
     else { alert('ポップアップがブロックされました。ブラウザの設定を確認してください。'); }
@@ -2754,18 +3316,10 @@ function App() {
             cursor: nodes.length ? 'pointer' : 'not-allowed',
             opacity: nodes.length ? 1 : 0.5, fontSize: 13
           }}>Export</button>
-          <button onClick={handlePDF} disabled={nodes.length === 0} style={{
-            padding: '4px 12px', borderRadius: 4, border: '1px solid rgba(255,255,255,0.7)',
-            background: 'transparent', color: '#fff',
-            cursor: nodes.length ? 'pointer' : 'not-allowed',
-            opacity: nodes.length ? 1 : 0.5, fontSize: 13
-          }}>PDF出力</button>
-          <button onClick={handleDiagramOutput} disabled={nodes.length === 0} style={{
-            padding: '4px 12px', borderRadius: 4, border: '1px solid rgba(255,255,255,0.7)',
-            background: 'transparent', color: '#fff',
-            cursor: nodes.length ? 'pointer' : 'not-allowed',
-            opacity: nodes.length ? 1 : 0.5, fontSize: 13
-          }}>系統図</button>
+          <OutputDropdown label="PDF出力" disabled={nodes.length === 0}
+            groups={groups} onAll={() => handlePDF()} onGroup={(gid) => handlePDF(gid)} />
+          <OutputDropdown label="系統図" disabled={nodes.length === 0}
+            groups={groups} onAll={() => handleDiagramOutput()} onGroup={(gid) => handleDiagramOutput(gid)} />
         </div>
       </header>
 
@@ -2778,7 +3332,7 @@ function App() {
           background: '#fff', borderRight: '1px solid #ddd', padding: 16
         }}>
 
-          {/* モード切替タブ (M2-1: 複数変圧器サポート) */}
+          {/* モード切替タブ (M2-1: 複数変圧器サポート, M2-6: グループ管理) */}
           <div style={{ display: 'flex', gap: 4, marginBottom: 12, flexWrap: 'wrap' }}>
             <button onClick={() => { setEditMode('transformer'); setSelectedId(null); setTrParams({ ...DEFAULT_TR_PARAMS }); }}
               style={{
@@ -2794,6 +3348,13 @@ function App() {
                 background: editMode === 'load' && !isEditing ? '#e3f2fd' : '#fff',
                 cursor: 'pointer', fontSize: 12, fontWeight: 600
               }}>+ 負荷回路</button>
+            <button onClick={() => setEditMode('group')}
+              style={{
+                padding: '6px 12px', borderRadius: 4,
+                border: editMode === 'group' ? '2px solid #1976d2' : '1px solid #ccc',
+                background: editMode === 'group' ? '#e3f2fd' : '#fff',
+                cursor: 'pointer', fontSize: 12, fontWeight: 600
+              }}>グループ</button>
           </div>
 
           {/* === 変圧器フォーム === */}
@@ -2812,6 +3373,16 @@ function App() {
               onSave={handleSaveTrunk} onCancel={resetToNewLoad}
               isEdit={isEditing && selectedNode?.type === 'trunk'}
               childSummary={trunkChildSummary}
+            />
+          )}
+
+          {/* === グループ管理 (M2-6) === */}
+          {editMode === 'group' && (
+            <GroupEditor
+              groups={groups} nodes={nodes} allResults={allResults} crossLinks={crossLinks}
+              onUpdateGroup={handleUpdateGroup} onRemoveGroup={handleRemoveGroup}
+              onAutoGroupAll={handleAutoGroupAll}
+              onAddCrossLink={handleAddCrossLink} onRemoveCrossLink={handleRemoveCrossLink}
             />
           )}
 
@@ -3035,6 +3606,8 @@ function App() {
                   nodes={nodes} allResults={allResults} selectedId={selectedId}
                   onSelect={handleSelectNode} onDelete={handleDeleteNode}
                   onAddChild={handleAddChild}
+                  groups={groups} crossLinks={crossLinks}
+                  onToggleGroupCollapse={handleToggleGroupCollapse}
                 />
               </div>
             </div>
@@ -3047,6 +3620,8 @@ function App() {
                 nodes={nodes} allResults={allResults} systemMeta={systemMeta}
                 selectedId={selectedId} onSelectNode={handleSelectNode}
                 mode={diagramMode} onNodesChange={setNodes}
+                groups={groups} crossLinks={crossLinks}
+                onToggleGroupCollapse={handleToggleGroupCollapse}
               />
             </div>
           )}
