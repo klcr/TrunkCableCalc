@@ -1,0 +1,24 @@
+{
+  "source": "JIS C 8201-2-1:2021 / 三菱電機 MCCB カタログ / 富士電機 MCCB カタログ",
+  "note": "MCCB 遮断容量 [kA]。フレーム別・電圧別・性能クラス別。standard=経済型（Ics クラス相当）、high=高遮断型（Icu 上位クラス）。電圧キーは定格使用電圧ベース: 230V（100-240V回路）、415V（380-440V回路）",
+  "data": {
+    "frames": {
+      "30AF":  { "ratings_AT": [5, 10, 15, 20, 30] },
+      "50AF":  { "ratings_AT": [15, 20, 30, 40, 50] },
+      "100AF": { "ratings_AT": [50, 60, 75, 100] },
+      "225AF": { "ratings_AT": [100, 125, 150, 175, 200, 225] },
+      "400AF": { "ratings_AT": [250, 300, 350, 400] },
+      "630AF": { "ratings_AT": [500, 600, 630] },
+      "800AF": { "ratings_AT": [700, 800] }
+    },
+    "icu_kA": {
+      "30AF":  { "230V": { "standard": 2.5,  "high": 5 },    "415V": { "standard": 2.5,  "high": 5 } },
+      "50AF":  { "230V": { "standard": 5,    "high": 10 },   "415V": { "standard": 5,    "high": 7.5 } },
+      "100AF": { "230V": { "standard": 10,   "high": 25 },   "415V": { "standard": 10,   "high": 25 } },
+      "225AF": { "230V": { "standard": 25,   "high": 50 },   "415V": { "standard": 25,   "high": 36 } },
+      "400AF": { "230V": { "standard": 36,   "high": 65 },   "415V": { "standard": 36,   "high": 50 } },
+      "630AF": { "230V": { "standard": 50,   "high": 85 },   "415V": { "standard": 42,   "high": 65 } },
+      "800AF": { "230V": { "standard": 65,   "high": 100 },  "415V": { "standard": 50,   "high": 85 } }
+    }
+  }
+}
