@@ -36,7 +36,8 @@ const FILE_VAR_MAP = {
   'cable-capacitance.json': 'C_CABLE',
   'zero-sequence.json': 'Z_ZERO',
   'short-time-withstand.json': 'WITHSTAND',
-  'elcb-specs.json': 'ELCB'
+  'elcb-specs.json': 'ELCB',
+  'mccb-icu.json': 'MCCB_ICU'
 };
 
 /* === メイン処理 === */

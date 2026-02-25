@@ -696,24 +696,20 @@ function calcFaultCurrents(nodes, allResults) {
   for (const tr of transformers) {
     const trR = allResults[tr.id];
     if (!trR) continue;
-    /* M2-3: HV cable impedance LV conversion (§20-2)
-     * 高圧ケーブルインピーダンスを LV 側に換算して Rsrc, Xsrc に加算する。
-     * P4 では hvSystem フィールドは全て null のため実行されない。
-     *
-     * const hv = tr.transformer.hvSystem;
-     * let Rsrc = trR.Rs, Xsrc = trR.Xs;
-     * if (hv && hv.cableType && hv.cableSize_mm2 && hv.totalCableLength_km) {
-     *   const freq = '50Hz'; // TODO: 系統周波数を transformer に持たせる
-     *   const hvImp = IMP_HV[freq] && IMP_HV[freq][String(hv.cableSize_mm2)];
-     *   if (hvImp) {
-     *     const ratio = Math.pow(tr.transformer.secondaryV / tr.transformer.primaryV, 2);
-     *     Rsrc += hvImp[0] * hv.totalCableLength_km * ratio;
-     *     Xsrc += hvImp[1] * hv.totalCableLength_km * ratio;
-     *   }
-     * }
-     * propagateFault(nodes, tr.id, Rsrc, Xsrc, tr.transformer.secondaryV, allResults);
-     */
-    propagateFault(nodes, tr.id, trR.Rs, trR.Xs, tr.transformer.secondaryV, allResults);
+    /* M2-2: HV cable impedance LV conversion (§20-2) */
+    const hv = tr.transformer.hvSystem;
+    let Rsrc = trR.Rs, Xsrc = trR.Xs;
+    if (hv && hv.cableType && hv.cableSize_mm2 && hv.totalCableLength_km) {
+      const freq = tr.transformer.freq || '60Hz';
+      const hvTable = IMP_HV[hv.cableType];
+      const hvImp = hvTable && hvTable[freq] && hvTable[freq][String(hv.cableSize_mm2)];
+      if (hvImp) {
+        const ratio = Math.pow(tr.transformer.secondaryV / tr.transformer.primaryV, 2);
+        Rsrc += hvImp[0] * hv.totalCableLength_km * ratio;
+        Xsrc += hvImp[1] * hv.totalCableLength_km * ratio;
+      }
+    }
+    propagateFault(nodes, tr.id, Rsrc, Xsrc, tr.transformer.secondaryV, allResults);
   }
 }
 
@@ -756,6 +752,143 @@ function checkWithstand(size_mm2, Isc3, t, parallel) {
 }
 
 /**
+ * getFrame — MCCB 定格電流からフレームサイズを逆引き (§20-4a)
+ */
+function getFrame(at) {
+  for (const [frame, info] of Object.entries(MCCB_ICU.frames)) {
+    if (info.ratings_AT.includes(at)) return frame;
+  }
+  return null;
+}
+
+/**
+ * getIcu — MCCB 遮断容量 [kA] を取得 (§20-4a)
+ */
+function getIcu(at, voltage, icuClass) {
+  const frame = getFrame(at);
+  if (!frame) return null;
+  const vKey = voltage <= 230 ? '230V' : '415V';
+  const entry = MCCB_ICU.icu_kA[frame];
+  if (!entry || !entry[vKey]) return null;
+  return entry[vKey][icuClass] || entry[vKey]['standard'] || null;
+}
+
+/**
+ * calcGroundFaultCurrent — HV 側一線地絡電流 Ig = 3ωCV (§20-5)
+ */
+function calcGroundFaultCurrent(tr) {
+  const hv = tr.transformer.hvSystem;
+  if (!hv || !hv.capacitance_uF_per_km || !hv.totalCableLength_km) return null;
+  const f = (tr.transformer.freq || '60Hz') === '50Hz' ? 50 : 60;
+  const omega = 2 * Math.PI * f;
+  const C_total = hv.capacitance_uF_per_km * hv.totalCableLength_km * 1e-6;
+  const V = tr.transformer.primaryV;
+  return 3 * omega * C_total * (V / Math.sqrt(3));
+}
+
+/**
+ * calcGroundingResistance — B種接地抵抗上限 (電技解釈第17条)
+ */
+function calcGroundingResistance(Ig, vcbTripTime_s) {
+  if (!Ig || Ig <= 0) return null;
+  return {
+    Ig: rd(Ig, 2),
+    Rb_05s: rd(150 / Ig, 1),
+    Rb_1s: rd(600 / Ig, 1),
+    Rb_2s: rd(300 / Ig, 1),
+    vcbTripTime_s
+  };
+}
+
+/**
+ * findAncestorTransformer — ノードの祖先変圧器を取得
+ */
+function findAncestorTransformer(nodes, nodeId) {
+  let current = nodes.find(n => n.id === nodeId);
+  while (current) {
+    if (current.type === 'transformer') return current;
+    current = current.parentId ? nodes.find(n => n.id === current.parentId) : null;
+  }
+  return null;
+}
+
+/**
+ * calcLVGroundFault — LV 側地絡電流（対称座標法 §20-7）
+ */
+function calcLVGroundFault(node, allResults, nodes) {
+  const r = allResults[node.id];
+  if (!r || r.Rcum == null || r.Xcum == null) return null;
+
+  const Z1_R = r.Rcum;
+  const Z1_X = r.Xcum;
+
+  const cfg = node.type === 'load' ? node.load : node.trunk;
+  const cableType = cfg?.cableType || 'CVT';
+  const isThreeCore = cableType === 'CV-3C' || cableType === 'CV-2C';
+  const zeroRatio = isThreeCore ? Z_ZERO.cable_ratios.three_core : Z_ZERO.cable_ratios.single_core;
+
+  const Z0_R = Z1_R * zeroRatio.R0_R1;
+  const Z0_X = Z1_X * (zeroRatio.X0_X1_typical || zeroRatio.X0_X1 || 4.0);
+
+  const tr = findAncestorTransformer(nodes, node.id);
+  if (!tr) return null;
+  const connection = tr.transformer.connection || 'Δ-Y';
+  const connMap = { 'Δ-Y': 'Dyn', 'Y-Y': 'Yyn', 'Δ-Δ': 'Dd', 'Y-Δ': 'Dd', 'V-V': 'Dyn' };
+  const connKey = connMap[connection] || 'Dyn';
+  const winding = Z_ZERO.transformer_winding_multipliers[connKey];
+  if (!winding || winding.factor == null) return null;
+
+  const trR = allResults[tr.id];
+  if (!trR) return null;
+  const ZT_R = trR.Rs * winding.factor;
+  const ZT_X = trR.Xs * winding.factor;
+
+  const Z0_total_R = Z0_R + ZT_R;
+  const Z0_total_X = Z0_X + ZT_X;
+
+  const Vs = cfg?.voltage || 210;
+  const Ea = Vs / Math.sqrt(3);
+  const Ztotal_R = 2 * Z1_R + Z0_total_R;
+  const Ztotal_X = 2 * Z1_X + Z0_total_X;
+  const Ztotal = Math.sqrt(Ztotal_R * Ztotal_R + Ztotal_X * Ztotal_X);
+  if (Ztotal === 0) return null;
+  const Ig_lv = 3 * Ea / Ztotal;
+
+  return { Ig_lv: rd(Ig_lv), Z1: rd(Math.sqrt(Z1_R * Z1_R + Z1_X * Z1_X), 4), Z0: rd(Math.sqrt(Z0_total_R * Z0_total_R + Z0_total_X * Z0_total_X), 4) };
+}
+
+/**
+ * checkELCB — ELCB 保護協調チェック (§20-8)
+ */
+function checkELCB(loadParams, Ig_lv) {
+  if (!loadParams.hasELCB) return null;
+  const IΔn = loadParams.elcbSensitivity_mA / 1000;
+
+  if (loadParams.groundingMethod === 'TT') {
+    const RA = loadParams.groundResistance_ohm || 100;
+    const touchV = RA * IΔn;
+    return {
+      ok: touchV <= 50,
+      touchV: rd(touchV, 1),
+      RA, IΔn_mA: loadParams.elcbSensitivity_mA,
+      method: 'TT',
+      formula: 'RA × IΔn = ' + RA + ' × ' + IΔn + ' = ' + rd(touchV, 1) + ' V'
+    };
+  }
+
+  if (loadParams.groundingMethod === 'TN' && Ig_lv) {
+    return {
+      ok: true,
+      method: 'TN',
+      Ig_lv: rd(Ig_lv),
+      IΔn_mA: loadParams.elcbSensitivity_mA
+    };
+  }
+
+  return null;
+}
+
+/**
  * calculateAll — 全ノード一括計算
  */
 function calculateAll(nodes) {
@@ -790,19 +923,42 @@ function calculateAll(nodes) {
   /* 5. トップダウン: 短絡電流 */
   calcFaultCurrents(nodes, results);
 
-  /* M2-3: 一線地絡電流 Ig = 3ωCV (§20-5)
-   * 非接地系 6.6kV 系統における一線地絡電流。
-   * 変圧器の hvSystem.capacitance_uF_per_km と系統全長から算出。
-   *
-   * function calcGroundFaultCurrent(freq, capacitance_uF, lineVoltage) {
-   *   const omega = 2 * Math.PI * (freq === '50Hz' ? 50 : 60);
-   *   const C = capacitance_uF * 1e-6; // [F]
-   *   return 3 * omega * C * (lineVoltage / Math.sqrt(3)); // [A]
-   * }
-   *
-   * §20-8: ELCB 保護協調 — TT系統: RA × IΔn ≤ 50V
-   * ELCB テーブル (data/elcb-specs.json) の感度電流・動作時間を使用。
-   */
+  /* 6. 遮断容量チェック (§20-4a) */
+  for (const n of nodes) {
+    const r = results[n.id];
+    if (!r || r.Isc3 == null) continue;
+    const cfg = n.type === 'load' ? n.load : n.type === 'trunk' ? n.trunk : null;
+    if (!cfg) continue;
+    const icuKA = getIcu(r.mccbAT, cfg.voltage || 210, cfg.icuClass || 'standard');
+    if (icuKA != null) {
+      r.icuKA = icuKA;
+      r.icuOK = icuKA * 1000 >= r.Isc3;
+    }
+  }
+
+  /* 7. HV 側一線地絡電流・B種接地 (§20-5) */
+  for (const n of nodes) {
+    if (n.type !== 'transformer') continue;
+    const r = results[n.id];
+    if (!r) continue;
+    const Ig = calcGroundFaultCurrent(n);
+    if (Ig != null) {
+      const vcbTime = n.transformer.hvSystem?.vcbTripTime_s || 1.0;
+      r.groundFault = calcGroundingResistance(Ig, vcbTime);
+    }
+  }
+
+  /* 8. ELCB 保護協調 + LV 側地絡電流 (§20-7, §20-8) */
+  for (const n of nodes) {
+    if (n.type !== 'load') continue;
+    const r = results[n.id];
+    if (!r) continue;
+    if (n.load.hasELCB) {
+      const gf = calcLVGroundFault(n, results, nodes);
+      if (gf) r.lvGroundFault = gf;
+      r.elcbCheck = checkELCB(n.load, gf?.Ig_lv);
+    }
+  }
 
   return results;
 }
@@ -1610,11 +1766,12 @@ const SLIDER_CFG = {
 const DEFAULT_PARAMS = {
   trunkName: '', loadName: '',
   system: '三相3線式', voltage: 200, freq: '60Hz', supplyType: '低圧受電',
-  circuitType: '一般', mccbATOverride: '自動',
+  circuitType: '一般', mccbATOverride: '自動', icuClass: 'standard',
   capacity: 15, unit: 'kW', powerFactor: 0.85, efficiency: 1.0,
   demandFactor: 100, cableLength: 30,
   cableType: 'CVT', wiringMethod: 'ケーブルラック配線',
-  ambientTemp: 40, reductionPreset: '1段 S=d 7列以上', reductionFactor: 0.70
+  ambientTemp: 40, reductionPreset: '1段 S=d 7列以上', reductionFactor: 0.70,
+  hasELCB: false, elcbSensitivity_mA: 30, groundingMethod: 'TT', groundResistance_ohm: 100
 };
 
 /* --- 変圧器デフォルト (§19) --- */
@@ -1626,7 +1783,8 @@ const DEFAULT_TR_PARAMS = {
     cableType: null,            /* 'CV-3C' | 'CVT' | null */
     cableSize_mm2: null,        /* number | null */
     totalCableLength_km: null,  /* number | null */
-    capacitance_uF_per_km: null /* number | null */
+    capacitance_uF_per_km: null, /* number | null */
+    vcbTripTime_s: 1.0          /* VCB 遮断時間 [s]（B種接地計算用） */
   }
 };
 
@@ -1635,7 +1793,7 @@ const DEFAULT_TRUNK_PARAMS = {
   name: '', system: '三相3線式', voltage: 210, freq: '60Hz', supplyType: '高圧受電',
   cableLength: 10, cableType: 'CVT', wiringMethod: 'ケーブルラック配線',
   ambientTemp: 40, reductionPreset: '1段 S=d 7列以上', reductionFactor: 0.70,
-  powerFactor: 0.85, mccbATOverride: '自動'
+  powerFactor: 0.85, mccbATOverride: '自動', icuClass: 'standard'
 };
 
 /* --- Badge コンポーネント (§11-1) --- */
@@ -1781,6 +1939,8 @@ function ProfileTab({ nodes, allResults, selectedId, onSelectNode }) {
   const [pathIdx, setPathIdx] = React.useState(0);
   const [logScale, setLogScale] = React.useState(true);
   const [showIw, setShowIw] = React.useState(true);
+  const [showIcu, setShowIcu] = React.useState(true);
+  const [showELCB, setShowELCB] = React.useState(false);
   const [hovered, setHovered] = React.useState(null);
 
   /* P2: 経路列挙と選択 */
@@ -1823,7 +1983,10 @@ function ProfileTab({ nodes, allResults, selectedId, onSelectNode }) {
       : node.type === 'trunk'
         ? (node.trunk?.name || '幹線')
         : (node.load?.name || '負荷');
-    return { id: node.id, type: node.type, label, Isc3, Iw: wt ? wt.Iwithstand : null, wtOK: wt ? wt.ok : null, size, parallel };
+    const icuKA = r ? r.icuKA : null;
+    const icuOK = r ? r.icuOK : null;
+    const elcbIΔn = (r && r.elcbCheck) ? r.elcbCheck.IΔn_mA / 1000 * 1000 : null; /* in A */
+    return { id: node.id, type: node.type, label, Isc3, Iw: wt ? wt.Iwithstand : null, wtOK: wt ? wt.ok : null, size, parallel, icuKA, icuOK, elcbIΔn };
   });
 
   const validIsc = dataPoints.filter(d => d.Isc3 != null && d.Isc3 > 0);
@@ -1839,6 +2002,8 @@ function ProfileTab({ nodes, allResults, selectedId, onSelectNode }) {
   /* P3: スケール計算 */
   const allValues = validIsc.map(d => d.Isc3);
   if (showIw) validIsc.forEach(d => { if (d.Iw) allValues.push(d.Iw); });
+  if (showIcu) validIsc.forEach(d => { if (d.icuKA) allValues.push(d.icuKA * 1000); });
+  if (showELCB) validIsc.forEach(d => { if (d.elcbIΔn) allValues.push(d.elcbIΔn); });
   const maxVal = Math.max(...allValues);
   const minVal = Math.min(...allValues.filter(v => v > 0));
 
@@ -1893,8 +2058,8 @@ function ProfileTab({ nodes, allResults, selectedId, onSelectNode }) {
     }
   }
 
-  /* P6: 交差点検出（Isc₃ > Iw の区間） */
-  const violations = dataPoints.filter(d => d.Isc3 && d.Iw && d.Isc3 > d.Iw);
+  /* P6: 交差点検出（Isc₃ > Iw or Isc₃ > Icu の区間） */
+  const violations = dataPoints.filter(d => d.Isc3 && ((d.Iw && d.Isc3 > d.Iw) || (d.icuKA && d.Isc3 > d.icuKA * 1000)));
 
   /* パンくず表示 */
   const breadcrumb = pathNodes.map(n => {
@@ -1955,6 +2120,43 @@ function ProfileTab({ nodes, allResults, selectedId, onSelectNode }) {
             </g>
           ))}
 
+          {/* M2-3-B: Icu しきい値線 */}
+          {showIcu && dataPoints.map((d, i) => {
+            if (d.icuKA == null || d.type === 'transformer') return null;
+            const icuA = d.icuKA * 1000;
+            const x1 = i > 0 ? (xScale(i - 1) + xScale(i)) / 2 : xScale(i) - plotW / (2 * n);
+            const x2 = i < dataPoints.length - 1 ? (xScale(i) + xScale(i + 1)) / 2 : xScale(i) + plotW / (2 * n);
+            return (
+              <g key={'icu' + i}>
+                <line x1={Math.max(x1, MARGIN.left)} x2={Math.min(x2, MARGIN.left + plotW)}
+                  y1={yScale(icuA)} y2={yScale(icuA)}
+                  stroke={d.icuOK ? '#ff9800' : '#ef5350'} strokeWidth={1.5} strokeDasharray="4,4" />
+                {i === 1 && (
+                  <text x={Math.min(x2, MARGIN.left + plotW) + 4} y={yScale(icuA)} dominantBaseline="middle"
+                    fontSize={9} fill="#ff9800">Icu</text>
+                )}
+              </g>
+            );
+          })}
+
+          {/* M2-3-E: IΔn しきい値線 */}
+          {showELCB && dataPoints.map((d, i) => {
+            if (d.elcbIΔn == null || d.type === 'transformer') return null;
+            const x1 = i > 0 ? (xScale(i - 1) + xScale(i)) / 2 : xScale(i) - plotW / (2 * n);
+            const x2 = i < dataPoints.length - 1 ? (xScale(i) + xScale(i + 1)) / 2 : xScale(i) + plotW / (2 * n);
+            return (
+              <g key={'elcb' + i}>
+                <line x1={Math.max(x1, MARGIN.left)} x2={Math.min(x2, MARGIN.left + plotW)}
+                  y1={yScale(d.elcbIΔn)} y2={yScale(d.elcbIΔn)}
+                  stroke="#9c27b0" strokeWidth={1.5} strokeDasharray="3,5" />
+                {i === dataPoints.length - 1 && (
+                  <text x={Math.min(x2, MARGIN.left + plotW) + 4} y={yScale(d.elcbIΔn)} dominantBaseline="middle"
+                    fontSize={9} fill="#9c27b0">IΔn</text>
+                )}
+              </g>
+            );
+          })}
+
           {/* P3: Isc₃ 折れ線 */}
           <path d={iscPath} fill="none" stroke="#1976d2" strokeWidth={2} />
 
@@ -1962,7 +2164,7 @@ function ProfileTab({ nodes, allResults, selectedId, onSelectNode }) {
           {dataPoints.map((d, i) => {
             if (d.Isc3 == null || d.Isc3 <= 0) return null;
             const x = xScale(i), y = yScale(d.Isc3);
-            const isViolation = d.Iw && d.Isc3 > d.Iw;
+            const isViolation = (d.Iw && d.Isc3 > d.Iw) || (d.icuKA && d.Isc3 > d.icuKA * 1000);
             const isSelected = d.id === selectedId;
             return (
               <g key={d.id}
@@ -2000,22 +2202,30 @@ function ProfileTab({ nodes, allResults, selectedId, onSelectNode }) {
           {/* P6: ホバーツールチップ */}
           {tooltipData && (() => {
             const i = hovered;
-            const x = Math.min(Math.max(xScale(i), MARGIN.left + 70), MARGIN.left + plotW - 70);
+            const x = Math.min(Math.max(xScale(i), MARGIN.left + 80), MARGIN.left + plotW - 80);
             const y = dataPoints[i].Isc3 > 0 ? yScale(dataPoints[i].Isc3) : MARGIN.top;
-            const tipY = y > MARGIN.top + plotH / 2 ? y - 72 : y + 16;
+            const hasIcu = tooltipData.icuKA != null;
+            const tipH = 64 + (hasIcu ? 12 : 0);
+            const tipY = y > MARGIN.top + plotH / 2 ? y - tipH - 8 : y + 16;
+            let lineY = tipY + 14;
             return (
               <g>
-                <rect x={x - 65} y={tipY} width={130} height={64} rx={4}
+                <rect x={x - 75} y={tipY} width={150} height={tipH} rx={4}
                   fill="rgba(33,33,33,0.92)" stroke="none" />
-                <text x={x} y={tipY + 14} textAnchor="middle" fontSize={10} fontWeight={700} fill="#fff">{tooltipData.label}</text>
-                <text x={x - 55} y={tipY + 28} fontSize={9} fill="#90caf9">Isc₃ = {fmtIsc(tooltipData.Isc3)}</text>
+                <text x={x} y={lineY} textAnchor="middle" fontSize={10} fontWeight={700} fill="#fff">{tooltipData.label}</text>
+                <text x={x - 65} y={lineY += 14} fontSize={9} fill="#90caf9">Isc₃ = {fmtIsc(tooltipData.Isc3)}</text>
                 {tooltipData.Iw && (
-                  <text x={x - 55} y={tipY + 40} fontSize={9} fill={tooltipData.wtOK ? '#a5d6a7' : '#ef9a9a'}>
+                  <text x={x - 65} y={lineY += 12} fontSize={9} fill={tooltipData.wtOK ? '#a5d6a7' : '#ef9a9a'}>
                     Iw = {fmtIsc(tooltipData.Iw)} ({tooltipData.wtOK ? '余裕 ×' + rd(tooltipData.Iw / tooltipData.Isc3, 1) : 'NG'})
                   </text>
                 )}
+                {hasIcu && (
+                  <text x={x - 65} y={lineY += 12} fontSize={9} fill={tooltipData.icuOK ? '#ffe0b2' : '#ef9a9a'}>
+                    Icu = {tooltipData.icuKA} kA ({tooltipData.icuOK ? '余裕 ×' + rd(tooltipData.icuKA * 1000 / tooltipData.Isc3, 1) : 'NG'})
+                  </text>
+                )}
                 {tooltipData.size && (
-                  <text x={x - 55} y={tipY + 52} fontSize={9} fill="#bbb">
+                  <text x={x - 65} y={lineY += 12} fontSize={9} fill="#bbb">
                     {tooltipData.size}{tooltipData.parallel > 1 ? '×' + tooltipData.parallel : ''} mm²
                   </text>
                 )}
@@ -2026,10 +2236,18 @@ function ProfileTab({ nodes, allResults, selectedId, onSelectNode }) {
       </div>
 
       {/* P7: レイヤートグル + スケール切替 */}
-      <div style={{ display: 'flex', gap: 16, alignItems: 'center', marginTop: 8, flexShrink: 0, fontSize: 12, color: '#666' }}>
+      <div style={{ display: 'flex', gap: 12, alignItems: 'center', marginTop: 8, flexShrink: 0, fontSize: 12, color: '#666', flexWrap: 'wrap' }}>
+        <label style={{ display: 'flex', alignItems: 'center', gap: 4, cursor: 'pointer' }}>
+          <input type="checkbox" checked={showIcu} onChange={e => setShowIcu(e.target.checked)} />
+          遮断容量 (Icu)
+        </label>
         <label style={{ display: 'flex', alignItems: 'center', gap: 4, cursor: 'pointer' }}>
           <input type="checkbox" checked={showIw} onChange={e => setShowIw(e.target.checked)} />
           ケーブル耐量 (Iw)
+        </label>
+        <label style={{ display: 'flex', alignItems: 'center', gap: 4, cursor: 'pointer' }}>
+          <input type="checkbox" checked={showELCB} onChange={e => setShowELCB(e.target.checked)} />
+          ELCB感度 (IΔn)
         </label>
         <div style={{ marginLeft: 'auto', display: 'flex', gap: 4 }}>
           <button onClick={() => setLogScale(true)}
@@ -2044,8 +2262,13 @@ function ProfileTab({ nodes, allResults, selectedId, onSelectNode }) {
       {/* 警告サマリー */}
       {violations.length > 0 && (
         <div style={{ marginTop: 8, padding: '8px 12px', background: '#fff3e0', borderRadius: 4, border: '1px solid #ffe0b2', fontSize: 12, flexShrink: 0 }}>
-          <span style={{ color: '#e65100', fontWeight: 700 }}>熱耐量超過: </span>
-          {violations.map(v => v.label).join(', ')} で Isc₃ > Iw
+          <span style={{ color: '#e65100', fontWeight: 700 }}>保護能力超過: </span>
+          {violations.map(v => {
+            const issues = [];
+            if (v.Iw && v.Isc3 > v.Iw) issues.push('Isc₃ > Iw');
+            if (v.icuKA && v.Isc3 > v.icuKA * 1000) issues.push('Isc₃ > Icu');
+            return v.label + ' (' + issues.join(', ') + ')';
+          }).join(', ')}
         </div>
       )}
     </div>
@@ -2192,8 +2415,40 @@ function ResultPanel({ result, params }) {
                   </React.Fragment>
                 );
               })()}
+              {r.icuKA != null && (
+                <div style={{ ...detailRow, fontWeight: 700, marginTop: 4 }}>
+                  <span>遮断容量 Icu</span>
+                  <span>{r.icuKA} kA <Badge ok={r.icuOK} label={r.icuOK ? 'OK' : 'NG'} /></span>
+                </div>
+              )}
             </div>
           </div>
+        </div>
+      )}
+
+      {/* 地絡保護（ELCB 設定回路のみ） */}
+      {r.elcbCheck && (
+        <div style={{ borderTop: '1px solid #f0f0f0', paddingTop: 8, marginTop: 4 }}>
+          <div style={sectionTitle}>地絡保護</div>
+          <div style={detailRow}>
+            <span>ELCB 感度 IΔn</span>
+            <span>{r.elcbCheck.IΔn_mA} mA</span>
+          </div>
+          {r.elcbCheck.method === 'TT' && (
+            <React.Fragment>
+              <div style={{ ...detailRow, fontWeight: 700 }}>
+                <span>接触電圧 RA×IΔn</span>
+                <span>{r.elcbCheck.touchV} V <Badge ok={r.elcbCheck.ok} label={r.elcbCheck.ok ? 'OK' : 'NG'} /></span>
+              </div>
+              <div style={{ fontSize: 11, color: '#888', marginTop: 2 }}>{r.elcbCheck.formula}</div>
+            </React.Fragment>
+          )}
+          {r.lvGroundFault && (
+            <div style={detailRow}>
+              <span>LV側地絡電流</span>
+              <span>{r.lvGroundFault.Ig_lv} A</span>
+            </div>
+          )}
         </div>
       )}
     </div>
@@ -2243,6 +2498,25 @@ function TransformerResultPanel({ result, nodes, nodeId, allResults }) {
         <div style={detailRow}><span>Xs</span><span>{rd(r.Xs * 1000, 2)} mΩ</span></div>
         <div style={{ ...detailRow, borderBottom: 'none' }}><span>|Zs|</span><span>{rd(r.Zs * 1000, 2)} mΩ</span></div>
       </div>
+      {r.groundFault && (
+        <div style={cardStyle}>
+          <div style={{ fontSize: 13, fontWeight: 700, marginBottom: 8, color: '#1976d2' }}>接地設計</div>
+          <div style={detailRow}><span>一線地絡電流 Ig</span><span>{r.groundFault.Ig} A</span></div>
+          <div style={detailRow}>
+            <span>B種接地抵抗上限</span>
+            <span>
+              {r.groundFault.vcbTripTime_s <= 0.5
+                ? r.groundFault.Rb_05s + ' Ω (150/Ig)'
+                : r.groundFault.vcbTripTime_s <= 1.0
+                  ? r.groundFault.Rb_1s + ' Ω (600/Ig)'
+                  : r.groundFault.Rb_2s + ' Ω (300/Ig)'}
+            </span>
+          </div>
+          <div style={{ fontSize: 11, color: '#888', marginTop: 4 }}>
+            Ig = 3ωCV = 3 × 2π × f × C × V/√3
+          </div>
+        </div>
+      )}
     </div>
   );
 }
@@ -2353,6 +2627,51 @@ function TransformerForm({ trParams, setTrParams, onSave, onCancel, isEdit }) {
           </select>
         </RC>
       </Sec>
+      <Sec title="高圧系統（受電側）">
+        <RC label="HV ケーブル種別">
+          <select value={trParams.hvSystem?.cableType || ''} style={selStyle}
+            onChange={e => {
+              const ct = e.target.value || null;
+              const sizes = ct && IMP_HV[ct] ? IMP_HV[ct].sizes_mm2 : [];
+              const sz = sizes.length > 0 ? sizes[Math.floor(sizes.length / 2)] : null;
+              const cap = ct && sz && C_CABLE[ct] ? C_CABLE[ct][String(sz)] || null : null;
+              setTrParams(p => ({ ...p, hvSystem: { ...p.hvSystem, cableType: ct, cableSize_mm2: sz, capacitance_uF_per_km: cap } }));
+            }}>
+            <option value="">未設定</option>
+            <option value="CV-3C">CV-3C</option>
+            <option value="CVT">CVT</option>
+          </select>
+        </RC>
+        <RC label="ケーブルサイズ [mm²]" show={!!trParams.hvSystem?.cableType}>
+          <select value={trParams.hvSystem?.cableSize_mm2 || ''} style={selStyle}
+            onChange={e => {
+              const sz = Number(e.target.value);
+              const ct = trParams.hvSystem?.cableType;
+              const cap = ct && C_CABLE[ct] ? C_CABLE[ct][String(sz)] || null : null;
+              setTrParams(p => ({ ...p, hvSystem: { ...p.hvSystem, cableSize_mm2: sz, capacitance_uF_per_km: cap } }));
+            }}>
+            {(trParams.hvSystem?.cableType && IMP_HV[trParams.hvSystem.cableType]
+              ? IMP_HV[trParams.hvSystem.cableType].sizes_mm2
+              : []).map(s => <option key={s} value={s}>{s}</option>)}
+          </select>
+        </RC>
+        <RC label="こう長 [km]" show={!!trParams.hvSystem?.cableType}>
+          <input type="number" step="0.01" min="0" value={trParams.hvSystem?.totalCableLength_km || ''} style={numStyle}
+            onChange={e => setTrParams(p => ({ ...p, hvSystem: { ...p.hvSystem, totalCableLength_km: parseFloat(e.target.value) || null } }))} />
+        </RC>
+        <RC label="対地静電容量 [μF/km]" show={!!trParams.hvSystem?.cableType}>
+          <input type="number" step="0.01" min="0" value={trParams.hvSystem?.capacitance_uF_per_km || ''} style={numStyle}
+            onChange={e => setTrParams(p => ({ ...p, hvSystem: { ...p.hvSystem, capacitance_uF_per_km: parseFloat(e.target.value) || null } }))} />
+        </RC>
+        <RC label="VCB 遮断時間 [s]" show={!!trParams.hvSystem?.cableType}>
+          <select value={trParams.hvSystem?.vcbTripTime_s || 1.0} style={selStyle}
+            onChange={e => setTrParams(p => ({ ...p, hvSystem: { ...p.hvSystem, vcbTripTime_s: parseFloat(e.target.value) } }))}>
+            <option value={0.5}>0.5 秒以内</option>
+            <option value={1.0}>1.0 秒以内</option>
+            <option value={2.0}>2.0 秒以内</option>
+          </select>
+        </RC>
+      </Sec>
       <div style={{ display: 'flex', gap: 8 }}>
         <button onClick={onSave} style={{
           flex: 1, padding: '10px', borderRadius: 6, border: 'none',
@@ -2434,6 +2753,13 @@ function TrunkForm({ trunkParams, setTrunkParams, onSave, onCancel, isEdit, chil
             onChange={e => setTrunkParams(p => ({ ...p, mccbATOverride: e.target.value }))}>
             <option>自動</option>
             {MCCB_AT.map(at => <option key={at} value={at}>{at} AT</option>)}
+          </select>
+        </RC>
+        <RC label="遮断容量クラス">
+          <select value={trunkParams.icuClass || 'standard'} style={selStyle}
+            onChange={e => setTrunkParams(p => ({ ...p, icuClass: e.target.value }))}>
+            <option value="standard">経済型 (standard)</option>
+            <option value="high">高遮断型 (high)</option>
           </select>
         </RC>
       </Sec>
@@ -3482,6 +3808,16 @@ function App() {
           const imported = data.nodes.map(n => {
             let newId = n.id;
             if (existingIds.has(n.id)) { newId = genId(); idMap[n.id] = newId; }
+            /* M2-3: 新フィールドのデフォルト補完 */
+            if (n.type === 'load' && n.load) {
+              n.load = { ...n.load, icuClass: n.load.icuClass || 'standard', hasELCB: n.load.hasELCB || false, elcbSensitivity_mA: n.load.elcbSensitivity_mA || 30, groundingMethod: n.load.groundingMethod || 'TT', groundResistance_ohm: n.load.groundResistance_ohm || 100 };
+            }
+            if (n.type === 'trunk' && n.trunk) {
+              n.trunk = { ...n.trunk, icuClass: n.trunk.icuClass || 'standard' };
+            }
+            if (n.type === 'transformer' && n.transformer) {
+              n.transformer = { ...n.transformer, hvSystem: { cableType: null, cableSize_mm2: null, totalCableLength_km: null, capacitance_uF_per_km: null, vcbTripTime_s: 1.0, ...(n.transformer.hvSystem || {}) } };
+            }
             return { ...n, id: newId, canvas: n.canvas || null };
           }).map(n => ({
             ...n, parentId: n.parentId ? (idMap[n.parentId] || n.parentId) : null
@@ -3740,6 +4076,12 @@ function App() {
                     {MCCB_AT.map(at => <option key={at} value={at}>{at} AT</option>)}
                   </select>
                 </RC>
+                <RC label="遮断容量クラス">
+                  <select value={params.icuClass} style={selStyle} onChange={e => updateSelect('icuClass', e.target.value)}>
+                    <option value="standard">経済型 (standard)</option>
+                    <option value="high">高遮断型 (high)</option>
+                  </select>
+                </RC>
               </Sec>
 
               <Sec title="負荷条件">
@@ -3818,6 +4160,33 @@ function App() {
                     <span style={{ fontSize: 13, color: '#333' }}>{params.reductionFactor}</span>
                   </RC>
                 )}
+              </Sec>
+
+              <Sec title="地絡保護">
+                <RC label="漏電遮断器 (ELCB)">
+                  <select value={params.hasELCB ? 'あり' : 'なし'} style={selStyle}
+                    onChange={e => updateSelect('hasELCB', e.target.value === 'あり')}>
+                    <option>なし</option><option>あり</option>
+                  </select>
+                </RC>
+                <RC label="感度電流 IΔn [mA]" show={params.hasELCB}>
+                  <select value={params.elcbSensitivity_mA} style={selStyle}
+                    onChange={e => updateSelect('elcbSensitivity_mA', Number(e.target.value))}>
+                    {[5, 10, 15, 30, 50, 100, 200, 500, 1000].map(v => <option key={v} value={v}>{v}</option>)}
+                  </select>
+                </RC>
+                <RC label="接地方式" show={params.hasELCB}>
+                  <select value={params.groundingMethod} style={selStyle}
+                    onChange={e => updateSelect('groundingMethod', e.target.value)}>
+                    <option value="TT">TT 系統</option>
+                    <option value="TN">TN 系統</option>
+                  </select>
+                </RC>
+                <RC label="接地抵抗 RA [Ω]" show={params.hasELCB && params.groundingMethod === 'TT'}>
+                  <SliderInput value={params.groundResistance_ohm} displayValue={display.groundResistance_ohm || params.groundResistance_ohm}
+                    cfg={{ step: 1, fine: 10, coarse: 50, decimals: 0 }} min={1} max={5000}
+                    onChange={v => updateNumLive('groundResistance_ohm', v)} onConfirm={() => confirmNum('groundResistance_ohm')} />
+                </RC>
               </Sec>
 
               {/* 登録/更新ボタン */}

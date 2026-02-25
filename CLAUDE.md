@@ -118,7 +118,7 @@ index.html（ビルド成果物）
 | `zero-sequence.json` | `Z_ZERO` | 零相インピーダンス推定係数・変圧器結線別乗数 | IEC 60909 / CENELEC CLC/TR 50480 |
 | `short-time-withstand.json` | `WITHSTAND` | 短時間耐電流 K 定数・I²t 許容値 | JCS 0168-1:2016 |
 | `elcb-specs.json` | `ELCB` | 漏電遮断器の感度電流・動作時間 | JIS C 8201-2-2:2021 |
-| `mccb-icu.json` | `MCCB_ICU` | MCCB 遮断容量 [kA]（フレーム別・電圧別・クラス別、M2-3 で整備予定） | JIS C 8201-2-1 / メーカーカタログ |
+| `mccb-icu.json` | `MCCB_ICU` | MCCB 遮断容量 [kA]（フレーム別・電圧別・クラス別） | JIS C 8201-2-1 / メーカーカタログ |
 
 ## 開発の判断基準（優先順）
 
