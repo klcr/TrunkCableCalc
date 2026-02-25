@@ -1201,13 +1201,18 @@ function TreeTable({ nodes, allResults, selectedId, onSelect, onDelete }) {
 
   const tree = buildTree(nodes);
 
+  /* --- カード内ラベル+値の共通スタイル --- */
+  const cellLabel = { fontSize: 10, color: '#888', marginBottom: 1 };
+  const cellValue = { fontSize: 13, fontWeight: 600 };
+  const infoCell = { display: 'flex', flexDirection: 'column', alignItems: 'flex-start' };
+  const rowStyle = { display: 'flex', alignItems: 'center', gap: 10, padding: '3px 0' };
+
   const renderNode = (node, depth) => {
     const r = allResults[node.id];
     const isSelected = node.id === selectedId;
     const isTr = node.type === 'transformer';
     const isTrunk = node.type === 'trunk';
-    const bgColor = isSelected ? '#e3f2fd' : isTr ? '#e8eaf6' : isTrunk ? '#f5f5f5' : '#fff';
-    const tag = isTr ? '[TR]' : isTrunk ? '[主幹]' : '└';
+    const tag = isTr ? 'TR' : isTrunk ? '主幹' : '└';
     const name = isTr ? (node.transformer?.name || 'TR')
       : isTrunk ? (node.trunk?.name || '幹線')
       : (node.load?.loadName || '負荷');
@@ -1216,68 +1221,120 @@ function TreeTable({ nodes, allResults, selectedId, onSelect, onDelete }) {
       : `${node.load?.system || ''} ${node.load?.voltage || ''}V`;
     const cType = isTrunk ? (node.trunk?.cableType || '') : (node.load?.cableType || '');
 
+    /* 左ボーダー色: OK=緑, NG=赤, 変圧器=青, 結果なし=グレー */
+    const borderColor = isTr ? '#3f51b5'
+      : (r && r.ok != null) ? (r.ok ? '#4caf50' : '#f44336')
+      : '#bdbdbd';
+
     return (
       <React.Fragment key={node.id}>
-        <tr onClick={() => onSelect(node)}
-          style={{ background: bgColor, cursor: 'pointer', borderBottom: '1px solid #eee' }}>
-          <td style={{ padding: '6px 4px', paddingLeft: 8 + depth * 20, fontSize: 12, whiteSpace: 'nowrap' }}>
+        <div
+          onClick={() => onSelect(node)}
+          style={{
+            marginLeft: depth * 24,
+            marginBottom: 6,
+            border: isSelected ? '2px solid #1976d2' : '1px solid #e0e0e0',
+            borderLeft: `4px solid ${borderColor}`,
+            borderRadius: 6,
+            background: isSelected ? '#e3f2fd' : isTr ? '#e8eaf6' : isTrunk ? '#fafafa' : '#fff',
+            cursor: 'pointer',
+            overflow: 'hidden'
+          }}
+        >
+          {/* ヘッダー: タグ + 名称 + 方式/電圧 + 削除 */}
+          <div style={{
+            display: 'flex', alignItems: 'center', padding: '5px 10px',
+            borderBottom: r ? '1px solid #eee' : 'none', gap: 6
+          }}>
             <span style={{
-              display: 'inline-block', padding: '1px 4px', borderRadius: 3, fontSize: 11,
-              fontWeight: 700, marginRight: 4,
+              display: 'inline-block', padding: '1px 6px', borderRadius: 3,
+              fontSize: 10, fontWeight: 700,
               background: isTr ? '#3f51b5' : isTrunk ? '#78909c' : 'transparent',
               color: isTr || isTrunk ? '#fff' : '#999'
             }}>{tag}</span>
-            {name}
-          </td>
-          <td style={{ padding: '6px 4px', fontSize: 12 }}>{sysV}</td>
-          <td style={{ padding: '6px 4px', fontSize: 12, textAlign: 'right' }}>
-            {r && r.dI != null ? `${r.dI}A` : r && r.In != null ? `${rd(r.In)}A` : '-'}
-          </td>
-          <td style={{ padding: '6px 4px', fontSize: 12 }}>
-            {r && r.size ? `${cType} ${r.size}` : '-'}
-          </td>
-          <td style={{ padding: '6px 4px', fontSize: 12, textAlign: 'right' }}>
-            {r && r.mccbAT ? `${r.mccbAT}` : '-'}
-          </td>
-          <td style={{ padding: '6px 4px', fontSize: 12, textAlign: 'right' }}>
-            {r && r.vd != null ? `${r.vd}V (${r.vdPercent}%)` : '-'}
-          </td>
-          <td style={{ padding: '6px 4px', fontSize: 12 }}>
-            {r && r.ok != null ? <Badge ok={r.ok} label={r.ok ? 'OK' : 'NG'} /> : '-'}
-          </td>
-          <td style={{ padding: '6px 4px', fontSize: 12, textAlign: 'right' }}>
-            {r && r.Isc3 ? `${rd(r.Isc3 / 1000, 1)}kA` : '-'}
-          </td>
-          <td style={{ padding: '6px 2px' }}>
+            <span style={{ fontSize: 12, fontWeight: 600, flex: 1 }}>{name}</span>
+            <span style={{ fontSize: 11, color: '#888' }}>{sysV}</span>
             <button onClick={e => { e.stopPropagation(); onDelete(node.id); }}
-              style={{ border: 'none', background: 'none', color: '#f44336', cursor: 'pointer', fontSize: 14, padding: '2px 6px' }}>×</button>
-          </td>
-        </tr>
+              style={{ border: 'none', background: 'none', color: '#f44336', cursor: 'pointer', fontSize: 14, padding: '0 4px', lineHeight: 1 }}>×</button>
+          </div>
+
+          {/* 負荷/幹線: 3段レイアウト */}
+          {r && !isTr && (
+            <div style={{ padding: '4px 10px 6px' }}>
+              {/* 1段目: 総合判定 + 選定ケーブル, MCCB定格, 設計電流 */}
+              <div style={{ ...rowStyle, borderBottom: '1px solid #f0f0f0', paddingBottom: 5 }}>
+                <Badge ok={r.ok} label={r.ok ? 'OK' : 'NG'} />
+                <div style={{ display: 'flex', gap: 16, flex: 1 }}>
+                  <div style={infoCell}>
+                    <span style={cellLabel}>選定ケーブル</span>
+                    <span style={cellValue}>{cType} {r.size} mm²</span>
+                  </div>
+                  <div style={infoCell}>
+                    <span style={cellLabel}>MCCB定格</span>
+                    <span style={cellValue}>{r.mccbAT} AT</span>
+                  </div>
+                  <div style={infoCell}>
+                    <span style={cellLabel}>設計電流</span>
+                    <span style={cellValue}>{r.dI} A</span>
+                  </div>
+                </div>
+              </div>
+              {/* 2段目: 許容電流 + 電圧降下 */}
+              <div style={{ ...rowStyle, borderBottom: '1px solid #f0f0f0', paddingBottom: 4 }}>
+                <div style={{ display: 'flex', alignItems: 'center', gap: 6, flex: 1 }}>
+                  <Badge ok={r.ampacityOK} label="許容電流" />
+                  <span style={{ fontSize: 12, color: '#555' }}>{r.effectiveAmpacity} A</span>
+                </div>
+                <div style={{ display: 'flex', alignItems: 'center', gap: 6, flex: 1 }}>
+                  <Badge ok={r.vdOK} label="電圧降下" />
+                  <span style={{ fontSize: 12, color: '#555' }}>{r.vd}V ({r.vdPercent}%)</span>
+                </div>
+              </div>
+              {/* 3段目: 保護協調 + 累積電圧降下 */}
+              <div style={{ ...rowStyle, paddingTop: 4 }}>
+                <div style={{ display: 'flex', alignItems: 'center', gap: 6, flex: 1 }}>
+                  <Badge ok={r.protOK} label="保護協調" />
+                </div>
+                <div style={{ display: 'flex', alignItems: 'center', gap: 6, flex: 1 }}>
+                  {r.cumulativeVd != null && r.cumulativeVd > 0 ? (
+                    <React.Fragment>
+                      <span style={{ fontSize: 10, color: '#888' }}>累積Vd</span>
+                      <span style={{ fontSize: 12, fontWeight: 600 }}>{r.cumulativeVd}V ({r.cumulativeVdP}%)</span>
+                    </React.Fragment>
+                  ) : (
+                    <span style={{ fontSize: 11, color: '#ccc' }}>—</span>
+                  )}
+                </div>
+              </div>
+            </div>
+          )}
+
+          {/* 変圧器: 定格情報 */}
+          {r && isTr && (
+            <div style={{ display: 'flex', gap: 20, padding: '6px 10px', fontSize: 12 }}>
+              <div style={infoCell}>
+                <span style={cellLabel}>定格二次電流</span>
+                <span style={cellValue}>{rd(r.In)} A</span>
+              </div>
+              <div style={infoCell}>
+                <span style={cellLabel}>Isc₃</span>
+                <span style={cellValue}>{rd(r.Isc3 / 1000, 1)} kA</span>
+              </div>
+              <div style={infoCell}>
+                <span style={cellLabel}>%Z</span>
+                <span style={cellValue}>{r.pctZ}%</span>
+              </div>
+            </div>
+          )}
+        </div>
         {node.children && node.children.map(child => renderNode(child, depth + 1))}
       </React.Fragment>
     );
   };
 
   return (
-    <div style={{ overflowX: 'auto' }}>
-      <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: 13 }}>
-        <thead>
-          <tr style={{ background: '#fafafa', borderBottom: '2px solid #ddd' }}>
-            <th style={{ padding: '6px 4px', textAlign: 'left', fontSize: 12 }}>名称</th>
-            <th style={{ padding: '6px 4px', textAlign: 'left', fontSize: 12 }}>方式/電圧</th>
-            <th style={{ padding: '6px 4px', textAlign: 'right', fontSize: 12 }}>設計I</th>
-            <th style={{ padding: '6px 4px', textAlign: 'left', fontSize: 12 }}>ケーブル</th>
-            <th style={{ padding: '6px 4px', textAlign: 'right', fontSize: 12 }}>AT</th>
-            <th style={{ padding: '6px 4px', textAlign: 'right', fontSize: 12 }}>e [V]</th>
-            <th style={{ padding: '6px 4px', textAlign: 'left', fontSize: 12 }}>判定</th>
-            <th style={{ padding: '6px 4px', textAlign: 'right', fontSize: 12 }}>Isc₃</th>
-            <th style={{ padding: '6px 4px', fontSize: 12 }}></th>
-          </tr>
-        </thead>
-        <tbody>
-          {tree.map(node => renderNode(node, 0))}
-        </tbody>
-      </table>
+    <div>
+      {tree.map(node => renderNode(node, 0))}
     </div>
   );
 }

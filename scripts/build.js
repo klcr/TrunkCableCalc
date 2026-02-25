@@ -12,8 +12,8 @@
  *   4. ルートに index.html を出力
  */
 
-const fs = require('fs');
-const path = require('path');
+const fs = require('node:fs');
+const path = require('node:path');
 
 const ROOT = path.resolve(__dirname, '..');
 const SRC = path.join(ROOT, 'src', 'index.html');
@@ -22,21 +22,21 @@ const OUT = path.join(ROOT, 'index.html');
 
 /* === JSON ファイル名 → JS 変数名のマッピング === */
 const FILE_VAR_MAP = {
-  'impedance-cv.json':        'IMP_CV',
-  'impedance-cvt.json':       'IMP_CVT',
-  'impedance-hv.json':        'IMP_HV',
-  'ampacity-rack.json':       'A_RACK',
-  'ampacity-conduit.json':    'A_COND',
-  'ampacity-direct.json':     'A_DIRECT',
-  'ampacity-duct.json':       'A_DUCT',
-  'temp-correction.json':     'TC',
-  'mccb-ratings.json':        'MCCB_AT',
-  'reduction-presets.json':   'RED_PRE',
+  'impedance-cv.json': 'IMP_CV',
+  'impedance-cvt.json': 'IMP_CVT',
+  'impedance-hv.json': 'IMP_HV',
+  'ampacity-rack.json': 'A_RACK',
+  'ampacity-conduit.json': 'A_COND',
+  'ampacity-direct.json': 'A_DIRECT',
+  'ampacity-duct.json': 'A_DUCT',
+  'temp-correction.json': 'TC',
+  'mccb-ratings.json': 'MCCB_AT',
+  'reduction-presets.json': 'RED_PRE',
   'transformer-ratings.json': 'TR_RATINGS',
-  'cable-capacitance.json':   'C_CABLE',
-  'zero-sequence.json':       'Z_ZERO',
+  'cable-capacitance.json': 'C_CABLE',
+  'zero-sequence.json': 'Z_ZERO',
   'short-time-withstand.json': 'WITHSTAND',
-  'elcb-specs.json':          'ELCB'
+  'elcb-specs.json': 'ELCB'
 };
 
 /* === メイン処理 === */
@@ -47,11 +47,14 @@ function main() {
     process.exit(1);
   }
 
-  let template = fs.readFileSync(SRC, 'utf8');
+  const template = fs.readFileSync(SRC, 'utf8');
 
   // data/*.json を読み込んで JS 定数宣言を生成
   const lines = [];
-  const files = fs.readdirSync(DATA_DIR).filter(f => f.endsWith('.json')).sort();
+  const files = fs
+    .readdirSync(DATA_DIR)
+    .filter((f) => f.endsWith('.json'))
+    .sort();
 
   for (const file of files) {
     const varName = FILE_VAR_MAP[file];

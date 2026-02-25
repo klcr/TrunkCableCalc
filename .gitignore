@@ -5,5 +5,8 @@ Thumbs.db
 .vscode/
 .idea/
 
+# 依存パッケージ
+node_modules/
+
 # ビルド成果物（node scripts/build.js で生成）
 /index.html
