@@ -1,0 +1,109 @@
+{
+  "source": "IEC 60909 / CENELEC CLC/TR 50480 / 内線規程 JEAC 8001 / 電技解釈第17条",
+  "note": "零相インピーダンス推定係数。日本のケーブルメーカー公開資料では零相インピーダンスは直接公開されていないため、正相インピーダンスデータと零相比（Z₀/Z₁）から算出する方式とする。変圧器結線方式別の零相リアクタンス乗数と、ケーブル形式別の零相比をパラメータとして保持する",
+  "data": {
+    "cable_ratios": {
+      "three_core": {
+        "label": "3心ケーブル（CV-3C, CV-2C）",
+        "note": "シース帰路を含む",
+        "R0_R1": 4.0,
+        "X0_X1_min": 3.0,
+        "X0_X1_max": 5.0,
+        "X0_X1_typical": 4.0
+      },
+      "single_core": {
+        "label": "単心ケーブル（CVT, CVD）",
+        "note": "遮蔽層各心独立、帰路は金属外装・接地線",
+        "R0_R1": 1.0,
+        "X0_X1_min": 1.0,
+        "X0_X1_max": 1.3,
+        "X0_X1_typical": 1.15
+      },
+      "default_non_magnetic": {
+        "label": "非磁性管路の場合の実装デフォルト推奨値",
+        "R0_R1": 1.59,
+        "X0_X1": 2.59
+      }
+    },
+    "transformer_winding_multipliers": {
+      "Dyn": {
+        "label": "デルタ-スター接地",
+        "factor": 1.0,
+        "note": "Δ側は零相電流遮断、Y側の接地中性点から零相電流が流れる。日本の配電用変圧器の標準結線"
+      },
+      "Yyn": {
+        "label": "スター-スター接地",
+        "factor": 5.0,
+        "note": "両側の接地中性点を通じて零相電流が流れる。零相リアクタンスが正相の5倍"
+      },
+      "Dzn": {
+        "label": "デルタ-ジグザグ接地",
+        "factor": 0.7,
+        "note": "ジグザグ巻線は零相インピーダンスが非常に低い。零相電流の供給能力が高い"
+      },
+      "Dd": {
+        "label": "デルタ-デルタ",
+        "factor": null,
+        "note": "Δ内環流のみ。外部に零相電流は流出しない（Z₀ = ∞）"
+      },
+      "Yy_ungrounded": {
+        "label": "スター-スター非接地",
+        "factor": null,
+        "note": "零相電流路なし（Z₀ = ∞）"
+      }
+    },
+    "ground_fault_formulas": {
+      "single_line_to_ground": {
+        "formula": "Ig = 3 × Ea / (2×Z₁ + Z₀ + 3×Zf)",
+        "note": "静的機器（ケーブル・変圧器）では Z₁ = Z₂ が成立。Ea = Vs / √3（相電圧）、Zf = 地絡点接触抵抗"
+      },
+      "iec_voltage_correction": {
+        "lv_cmax": 1.05,
+        "lv_cmin": 0.95,
+        "hv_cmax": 1.10,
+        "hv_cmin": 1.00,
+        "note": "IEC 60909の電圧補正係数。E = c × Vn / √3"
+      },
+      "cenelec_supply_reactance": {
+        "Dyn": "X_SUP = X_Q + X_T + X_C",
+        "Yyn": "X_SUP = X_Q + 5×X_T + X_C",
+        "Dzn": "X_SUP = X_Q + 0.7×X_T + X_C",
+        "note": "CENELEC CLC/TR 50480 に基づく地絡ループインピーダンスの供給側リアクタンス計算"
+      }
+    },
+    "tt_system": {
+      "formula": "RA × IΔn ≤ 50V",
+      "touch_voltage_limit_V": 50,
+      "note": "TT系統での保護条件。RA: 機器側接地極の抵抗、IΔn: 漏電遮断器の動作電流"
+    },
+    "tn_system": {
+      "formula": "Zs ≤ U₀ / Ia",
+      "note": "TN系統の場合（IEC 60364-4-41）。Zs: 故障ループインピーダンス、U₀: 公称対地電圧、Ia: 保護装置動作電流"
+    },
+    "hv_ungrounded": {
+      "note": "日本の6.6kV高圧配電系統は非接地方式。一線地絡電流は対地静電容量による充電電流が支配的",
+      "formula_overhead_only": "Ig = 1 + (V/3 × L − 100) / 150 [A]（2A未満は2A）",
+      "formula_cable_only": "Ig = 1 + (V × L' / 3 − 1/2) [A]",
+      "formula_mixed": "Ig = 1 + (V/3 × L − 100) / 150 + (V × L' / 3 − 1/2) [A]",
+      "note_V": "V = 公称電圧 / 1.1 [kV]（6.6kVの場合 V = 6）、L: 架空電線延長 [km]、L': ケーブル延長 [km]"
+    },
+    "grounding_resistance": {
+      "B_type": {
+        "no_auto_disconnect": "R_B ≤ 150 / Ig",
+        "within_1s": "R_B ≤ 600 / Ig",
+        "within_2s": "R_B ≤ 300 / Ig",
+        "note": "高低圧混触時のB種接地抵抗値（電技解釈第17条）。Ig: 高圧側一線地絡電流 [A]"
+      },
+      "C_type": {
+        "standard": "10Ω以下",
+        "with_elcb_05s": "500Ω以下",
+        "note": "300V超の低圧機器。0.5秒以内動作ELCB設置時は緩和"
+      },
+      "D_type": {
+        "standard": "100Ω以下",
+        "with_elcb_05s": "500Ω以下",
+        "note": "300V以下の低圧機器。0.5秒以内動作ELCB設置時は緩和"
+      }
+    }
+  }
+}

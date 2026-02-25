@@ -91,25 +91,33 @@ HV 側（対地静電容量基準）は M2-3 との統合を見据えたデー�
 
 #### P4-5: 変圧器ノード
 
-- [ ] data/transformer-ratings.json 新規作成（JIS C 4304 / JEC 2200 基準）
-- [ ] scripts/build.js に transformer-ratings.json → TR_RATINGS 注入追加
-- [ ] calcTransformer 関数: %Z → ソースインピーダンス、定格電流、短絡電流、利用率
-- [ ] 変圧器編集フォーム（名称、容量、一次/二次電圧、%Z、結線方式）
+- [x] data/transformer-ratings.json の拡張（河村カタログ %Z+X/R比、単相油入、モールド追加）
+- [x] scripts/build.js に transformer-ratings.json → TR_RATINGS 注入追加
+- [x] 仕様書更新（§19 変圧器ノード: 種別追加、%Z/X/R比テーブル差替え、R+jX分解式追加）
+- [x] CLAUDE.md 更新（TR_RATINGS 記載更新、IMP_HV/Z_ZERO/WITHSTAND/ELCB 追記）
+- [ ] calcTransformer 関数: %Z+X/R比 → Rs+jXs ソースインピーダンス分解、定格電流、短絡電流、利用率
+- [ ] 変圧器編集フォーム（名称、種別、容量、一次/二次電圧、%Z、X/R比、結線方式）
 - [ ] 電圧継承: secondaryVoltage → 下位ノードの voltage 自動設定
-- [ ] 仕様書更新（§19 変圧器ノード）
-- [ ] CLAUDE.md 更新（TR_RATINGS 追記）
 
-#### P4-6: 地絡電流計算（LV 側 — %Z 基準）
+#### P4-6: 短絡電流計算（LV 側 — R+jX ベクトル累積）
 
-- [ ] calcFaultCurrents: 変圧器 Zs を起点にケーブル Z を累積、各ノード Isc 算出
-- [ ] ResultPanel に利用可能短絡電流 Isc 表示追加
-- [ ] TreeTable に Isc 列追加（オプション）
-- [ ] 仕様書更新（§20 短絡・地絡電流計算）
+- [x] data/short-time-withstand.json 新規作成（K定数テーブル、I²t値）
+- [x] scripts/build.js に short-time-withstand.json → WITHSTAND 注入追加
+- [x] 仕様書更新（§20 R+jXベクトル累積方式に変更、§20-6 短時間耐電流検証 追加）
+- [ ] calcFaultCurrents: 変圧器 Rs+jXs を起点に R,X を独立累積、各ノード |Ztotal|→Isc₃ 算出
+- [ ] checkWithstand: ケーブル I²t 耐量 vs Isc₃²×t 検証
+- [ ] ResultPanel に利用可能短絡電流 Isc₃ + 熱耐量 OK/NG 表示追加
+- [ ] TreeTable に Isc₃ 列追加（オプション）
 
-#### P4-7: HV 側地絡データモデル準備
+#### P4-7: HV 側データモデル準備
 
-- [ ] data/cable-capacitance.json プレースホルダー新規作成
-- [ ] transformer ノードスキーマに hvSystem 予約フィールド追加（totalCableLength_km, capacitance_uF_per_km）
+- [x] data/impedance-hv.json 新規作成（6600V CV-3C/CVT インピーダンス）
+- [x] data/zero-sequence.json 新規作成（零相比、結線別乗数、地絡計算式）
+- [x] data/elcb-specs.json 新規作成（ELCB感度電流・動作時間）
+- [x] scripts/build.js に IMP_HV/Z_ZERO/C_CABLE/ELCB 注入追加
+- [x] 仕様書更新（§19-5 HVケーブルインピーダンスフィールド追加、§20-7/20-8 将来実装節追加）
+- [ ] transformer ノードスキーマに hvSystem 予約フィールド追加（cableType, cableSize, totalCableLength_km, capacitance_uF_per_km）
+- [ ] HV ケーブルインピーダンスの LV 側換算（calcFaultCurrents 内でオプション使用）
 - [ ] Ig = 3ωCV 計算スタブ（コメントのみ）
 - [ ] M2-3 統合ポイントの明記
 
