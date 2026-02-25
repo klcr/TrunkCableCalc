@@ -58,7 +58,8 @@ index.html（ビルド成果物）
 ├── CDN <script>    — React 18 / ReactDOM / Babel Standalone
 └── <script type="text/babel">
     ├── DATA TABLES     — ← data/*.json からビルド時に自動注入
-    ├── CALC ENGINE     — 計算ロジック（runCalc, runParentCalc）
+    ├── TREE UTILITIES  — ツリー操作ユーティリティ（genId, getChildren, buildTree 等）
+    ├── CALC ENGINE     — 計算ロジック（runCalc, runParentCalc, calcTransformer, calcFaultCurrents）
     ├── COMPONENTS      — UI コンポーネント（Slider, Sec, RC, Badge 等）
     ├── PDF GENERATION  — 計算書 HTML 生成（genPDF）
     └── APP             — メインコンポーネント（App）
@@ -68,7 +69,7 @@ index.html（ビルド成果物）
 
 | ドキュメント | パス | 内容 |
 |-------------|------|------|
-| 機能仕様書 | `docs/spec-cable-calc.md` | 低圧幹線ケーブル計算ツールの全 17 セクション仕様。実装時はこの仕様に準拠すること |
+| 機能仕様書 | `docs/spec-cable-calc.md` | 低圧幹線ケーブル計算ツールの全 20 セクション仕様。実装時はこの仕様に準拠すること |
 | マイルストーン | `docs/milestones.md` | 低圧幹線計算（Phase 1〜6）＋幹線系統図自動生成（M2-1〜5）の進捗管理 |
 
 - 実装前に仕様書の該当セクションを確認する
@@ -110,6 +111,8 @@ index.html（ビルド成果物）
 | `temp-correction.json` | `TC` | 温度補正係数（気中 / 地中） | 内線規程 |
 | `mccb-ratings.json` | `MCCB_AT` | MCCB 定格電流の選択肢 [A] | JIS C 8201-2-1 |
 | `reduction-presets.json` | `RED_PRE` | 多条低減率プリセット | 内線規程 |
+| `transformer-ratings.json` | `TR_RATINGS` | 変圧器標準容量・典型%Z値 | JIS C 4304 / JEC 2200 |
+| `cable-capacitance.json` | `C_CABLE` | ケーブル対地静電容量 [μF/km]（将来用） | 技資第 103 号 A |
 
 ## 開発の判断基準（優先順）
 
