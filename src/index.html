@@ -564,6 +564,35 @@ function aggregateCurrents(nodes, trunkId, allResults) {
 }
 
 /**
+ * checkBranchBreaker — 分岐ブレーカー省略条件判定 (電技解釈 第148条第4号)
+ *
+ * @param {number} IW  - 分岐幹線の許容電流（補正後実効値）[A]
+ * @param {number} IB  - 電源側（親幹線）MCCB の定格電流 [AT]
+ * @param {number} branchLength - 分岐点〜分岐側 MCCB までの距離 [m]
+ * @param {boolean} hasBranchLine - 負荷側に幹線分岐があるか
+ * @returns {{ required: boolean, rule: string, ratio: number }}
+ */
+function checkBranchBreaker(IW, IB, branchLength, hasBranchLine) {
+  if (IB <= 0) return { required: false, rule: '—', ratio: null };
+  const ratio = IW / IB;
+
+  /* イ号: IW ≧ IB × 55%（長さ制限なし） */
+  if (ratio >= 0.55)
+    return { required: false, rule: 'イ（55%条件）', ratio: rd(ratio * 100, 1) };
+
+  /* ロ号: L ≦ 8m かつ IW ≧ IB × 35% */
+  if (branchLength <= 8 && ratio >= 0.35)
+    return { required: false, rule: 'ロ（35%・8m条件）', ratio: rd(ratio * 100, 1) };
+
+  /* ハ号: L ≦ 3m かつ 負荷側に幹線分岐なし */
+  if (branchLength <= 3 && !hasBranchLine)
+    return { required: false, rule: 'ハ（3m・末端条件）', ratio: rd(ratio * 100, 1) };
+
+  /* 省略不可 */
+  return { required: true, rule: '省略不可', ratio: rd(ratio * 100, 1) };
+}
+
+/**
  * runTrunkCalc — 幹線ノードのケーブルサイズ選定
  */
 function runTrunkCalc(trunk, agg) {
@@ -991,6 +1020,32 @@ function calculateAll(nodes) {
     }
   }
 
+  /* 10. 分岐ブレーカー省略条件判定 (電技解釈148条4号) */
+  for (const n of nodes) {
+    if (n.type === 'transformer') continue;
+    const r = results[n.id];
+    if (!r) continue;
+    if (!n.parentId) continue;
+    const parent = nodes.find(p => p.id === n.parentId);
+    if (!parent) continue;
+    const parentResult = results[parent.id];
+    if (!parentResult) continue;
+
+    /* IB: 電源側（親幹線）MCCB の AT */
+    const IB = parentResult.mccbAT || 0;
+    /* IW: 分岐幹線の許容電流（補正後実効値） */
+    const IW = r.effectiveAmpacity || 0;
+    /* branchLength: 分岐点〜分岐側 MCCB の距離 */
+    const cfg = n.type === 'load' ? n.load : n.trunk;
+    const branchLength = cfg.branchLength || 0;
+    /* hasBranchLine: 負荷側に幹線分岐があるか */
+    const hasBranchLine = nodes.some(c => c.parentId === n.id && c.type === 'trunk');
+
+    r.branchBreaker = checkBranchBreaker(IW, IB, branchLength, hasBranchLine);
+    r.branchBreaker.IW = rd(IW);
+    r.branchBreaker.IB = IB;
+  }
+
   return results;
 }
 
@@ -1210,33 +1265,186 @@ function ensureCanvasPositions(nodes, direction) {
 
 /* === DIAGRAM: CONNECTION LINE (M2-4-4) === */
 
-function ConnectionLine({ fromCanvas, toCanvas, direction, ok, selected }) {
+/** 親→ブスバー→分岐MCCB→子 の接続を一括描画 */
+function BranchPointGroup({ parentNode, childNodes, allResults, direction, selectedId, collapsedNodeIds }) {
   const dir = DIRECTIONS[direction || 'horizontal'];
-  let fx, fy, tx, ty;
-  if (dir.outPort === 'right') {
-    fx = fromCanvas.x + fromCanvas.width;
-    fy = fromCanvas.y + fromCanvas.height / 2;
-    tx = toCanvas.x;
-    ty = toCanvas.y + toCanvas.height / 2;
+  const pc = parentNode.canvas;
+  if (!pc) return null;
+
+  /* 可視子ノード（canvas あり、折りたたみ非対象） */
+  const visChildren = childNodes.filter(c => c.canvas && !collapsedNodeIds.has(c.id));
+  if (visChildren.length === 0) return null;
+
+  /* 親の出力ポート位置 */
+  const px = dir.outPort === 'right' ? pc.x + pc.width : pc.x + pc.width / 2;
+  const py = dir.outPort === 'right' ? pc.y + pc.height / 2 : pc.y + pc.height;
+
+  /* ブスバー位置（親出力から 30px 先） */
+  const BB_OFFSET = 30;
+  const MCCB_OFFSET = 20;   /* ブスバーから MCCB 中心までの距離 */
+  const BB_THICK = 4;
+
+  const isHoriz = dir.outPort === 'right';
+
+  /* 各子の入力ポート位置 */
+  const childPorts = visChildren.map(c => {
+    const cc = c.canvas;
+    return {
+      node: c,
+      x: dir.inPort === 'left' ? cc.x : cc.x + cc.width / 2,
+      y: dir.inPort === 'left' ? cc.y + cc.height / 2 : cc.y
+    };
+  });
+
+  /* ブスバーの cross-axis 範囲 */
+  let bbStart, bbEnd, bbMain;
+  if (isHoriz) {
+    bbMain = px + BB_OFFSET;
+    const ys = childPorts.map(cp => cp.y);
+    bbStart = Math.min(py, ...ys) - 2;
+    bbEnd = Math.max(py, ...ys) + 2;
   } else {
-    fx = fromCanvas.x + fromCanvas.width / 2;
-    fy = fromCanvas.y + fromCanvas.height;
-    tx = toCanvas.x + toCanvas.width / 2;
-    ty = toCanvas.y;
+    bbMain = py + BB_OFFSET;
+    const xs = childPorts.map(cp => cp.x);
+    bbStart = Math.min(px, ...xs) - 2;
+    bbEnd = Math.max(px, ...xs) + 2;
   }
-  const mx = (fx + tx) / 2;
-  const my = (fy + ty) / 2;
-  const d = dir.outPort === 'right'
-    ? `M${fx},${fy} C${mx},${fy} ${mx},${ty} ${tx},${ty}`
-    : `M${fx},${fy} C${fx},${my} ${tx},${my} ${tx},${ty}`;
-  return (
-    <path d={d}
-      fill="none"
-      stroke={selected ? '#1976d2' : ok === false ? '#c00' : '#666'}
-      strokeWidth={selected ? 2.5 : 1.5}
-      strokeDasharray={ok === false ? '4 2' : 'none'}
-    />
-  );
+
+  const isSel = selectedId === parentNode.id;
+  const elements = [];
+
+  /* 1. 親→ブスバーの接続線 */
+  if (isHoriz) {
+    elements.push(<line key="p2bb" x1={px} y1={py} x2={bbMain} y2={py}
+      stroke={isSel ? '#1976d2' : '#666'} strokeWidth={isSel ? 2.5 : 1.5} />);
+  } else {
+    elements.push(<line key="p2bb" x1={px} y1={py} x2={px} y2={bbMain}
+      stroke={isSel ? '#1976d2' : '#666'} strokeWidth={isSel ? 2.5 : 1.5} />);
+  }
+
+  /* 2. ブスバー描画 */
+  if (isHoriz) {
+    elements.push(<rect key="bb" x={bbMain - BB_THICK / 2} y={bbStart} width={BB_THICK} height={bbEnd - bbStart}
+      fill="#333" rx={1} />);
+  } else {
+    elements.push(<rect key="bb" x={bbStart} y={bbMain - BB_THICK / 2} width={bbEnd - bbStart} height={BB_THICK}
+      fill="#333" rx={1} />);
+  }
+
+  /* 3. 各子への接続: ブスバー → 分岐MCCB → 子 */
+  for (const cp of childPorts) {
+    const r = allResults[cp.node.id];
+    const ok = r ? r.ok : null;
+    const sel = selectedId === cp.node.id || isSel;
+    const col = sel ? '#1976d2' : ok === false ? '#c00' : '#666';
+    const sw = sel ? 2.5 : 1.5;
+    const dash = ok === false ? '4 2' : 'none';
+
+    /* 分岐ブレーカー判定結果 */
+    const bb = r && r.branchBreaker;
+    const bbRequired = bb ? bb.required : true;
+    const bbOmittable = bb && !bb.required && bb.rule !== '—';
+
+    if (isHoriz) {
+      const mccbX = bbMain + MCCB_OFFSET;
+      const mccbY = cp.y;
+
+      /* ブスバー → MCCB */
+      elements.push(<line key={`bb2m-${cp.node.id}`}
+        x1={bbMain + BB_THICK / 2} y1={mccbY} x2={mccbX - 10} y2={mccbY}
+        stroke={col} strokeWidth={sw} strokeDasharray={dash} />);
+
+      /* 分岐 MCCB シンボル */
+      if (bbRequired) {
+        /* 省略不可: 実線 MCCB */
+        elements.push(
+          <g key={`mccb-${cp.node.id}`}>
+            <rect x={mccbX - 10} y={mccbY - 7} width={20} height={14} fill="#fff" stroke="#333" strokeWidth={1.2} />
+            <line x1={mccbX - 5} y1={mccbY - 7} x2={mccbX + 5} y2={mccbY + 7} stroke="#333" strokeWidth={1.2} />
+          </g>
+        );
+      } else if (bbOmittable) {
+        /* 省略可: 破線 MCCB（グレー） */
+        elements.push(
+          <g key={`mccb-${cp.node.id}`} opacity={0.4}>
+            <rect x={mccbX - 10} y={mccbY - 7} width={20} height={14} fill="#fff" stroke="#999" strokeWidth={1} strokeDasharray="3 2" />
+            <line x1={mccbX - 5} y1={mccbY - 7} x2={mccbX + 5} y2={mccbY + 7} stroke="#999" strokeWidth={1} strokeDasharray="3 2" />
+          </g>
+        );
+      }
+
+      /* MCCB AT ラベル */
+      if (r && r.mccbAT) {
+        elements.push(<text key={`at-${cp.node.id}`}
+          x={mccbX} y={mccbY - 10} fontSize={7} textAnchor="middle" fill={bbOmittable ? '#aaa' : '#333'}>
+          {r.mccbAT}AT
+        </text>);
+      }
+
+      /* 省略可ラベル */
+      if (bbOmittable) {
+        elements.push(<text key={`skip-${cp.node.id}`}
+          x={mccbX} y={mccbY + 18} fontSize={6} textAnchor="middle" fill="#999">
+          省略可
+        </text>);
+      }
+
+      /* MCCB → 子 */
+      elements.push(<line key={`m2c-${cp.node.id}`}
+        x1={mccbX + 10} y1={mccbY} x2={cp.x} y2={cp.y}
+        stroke={col} strokeWidth={sw} strokeDasharray={dash} />);
+
+    } else {
+      /* 縦型レイアウト */
+      const mccbX = cp.x;
+      const mccbY = bbMain + MCCB_OFFSET;
+
+      /* ブスバー → MCCB */
+      elements.push(<line key={`bb2m-${cp.node.id}`}
+        x1={mccbX} y1={bbMain + BB_THICK / 2} x2={mccbX} y2={mccbY - 7}
+        stroke={col} strokeWidth={sw} strokeDasharray={dash} />);
+
+      /* 分岐 MCCB シンボル */
+      if (bbRequired) {
+        elements.push(
+          <g key={`mccb-${cp.node.id}`}>
+            <rect x={mccbX - 10} y={mccbY - 7} width={20} height={14} fill="#fff" stroke="#333" strokeWidth={1.2} />
+            <line x1={mccbX - 5} y1={mccbY - 7} x2={mccbX + 5} y2={mccbY + 7} stroke="#333" strokeWidth={1.2} />
+          </g>
+        );
+      } else if (bbOmittable) {
+        elements.push(
+          <g key={`mccb-${cp.node.id}`} opacity={0.4}>
+            <rect x={mccbX - 10} y={mccbY - 7} width={20} height={14} fill="#fff" stroke="#999" strokeWidth={1} strokeDasharray="3 2" />
+            <line x1={mccbX - 5} y1={mccbY - 7} x2={mccbX + 5} y2={mccbY + 7} stroke="#999" strokeWidth={1} strokeDasharray="3 2" />
+          </g>
+        );
+      }
+
+      /* MCCB AT ラベル */
+      if (r && r.mccbAT) {
+        elements.push(<text key={`at-${cp.node.id}`}
+          x={mccbX + 14} y={mccbY + 3} fontSize={7} textAnchor="start" fill={bbOmittable ? '#aaa' : '#333'}>
+          {r.mccbAT}AT
+        </text>);
+      }
+
+      /* 省略可ラベル */
+      if (bbOmittable) {
+        elements.push(<text key={`skip-${cp.node.id}`}
+          x={mccbX - 14} y={mccbY + 3} fontSize={6} textAnchor="end" fill="#999">
+          省略可
+        </text>);
+      }
+
+      /* MCCB → 子 */
+      elements.push(<line key={`m2c-${cp.node.id}`}
+        x1={mccbX} y1={mccbY + 7} x2={cp.x} y2={cp.y}
+        stroke={col} strokeWidth={sw} strokeDasharray={dash} />);
+    }
+  }
+
+  return <g>{elements}</g>;
 }
 
 /* === DIAGRAM: MODULE COMPONENTS (M2-4-2) === */
@@ -1290,12 +1498,9 @@ function ModuleTrunk({ node, result, canvas, selected, mode, direction, onMouseD
        onClick={onClick}>
       <rect x={x} y={y} width={w} height={h} rx={4} fill={bgColor} stroke={borderColor} strokeWidth={1.5} />
       {selected && <rect x={x - 2} y={y - 2} width={w + 4} height={h + 4} rx={6} fill="none" stroke="#1976d2" strokeWidth={2} strokeDasharray="4 2" />}
-      {/* MCCB シンボル (左端内部) */}
-      <SvgMCCB x={x + 18} y={y + h / 2} />
-      {result && <text x={x + 36} y={y + h / 2 - 6} fontSize={8} fill="#333">{result.mccbAT}AT</text>}
-      {/* ケーブル表記 */}
-      <text x={x + 36} y={y + h / 2 + 5} fontSize={8} fill="#555">{tr.cableType} {sizeStr}</text>
-      <text x={x + 36} y={y + h / 2 + 15} fontSize={7} fill="#888">{tr.cableLength}m</text>
+      {/* ケーブル表記 (MCCB はブスバー側に移動) */}
+      <text x={x + 8} y={y + h / 2 - 4} fontSize={8} fill="#555">{tr.cableType} {sizeStr}</text>
+      <text x={x + 8} y={y + h / 2 + 7} fontSize={7} fill="#888">{tr.cableLength}m</text>
       {/* 名称 */}
       <text x={x + w / 2} y={y - 5} fontSize={10} textAnchor="middle" fontWeight={600} fill="#333">{tr.name || '幹線'}</text>
       {/* 電流・電圧降下 */}
@@ -1338,10 +1543,8 @@ function ModuleLoadNode({ node, result, canvas, selected, mode, direction, onMou
        onClick={onClick}>
       <rect x={x} y={y} width={w} height={h} rx={4} fill={bgColor} stroke={borderColor} strokeWidth={1.5} />
       {selected && <rect x={x - 2} y={y - 2} width={w + 4} height={h + 4} rx={6} fill="none" stroke="#1976d2" strokeWidth={2} strokeDasharray="4 2" />}
-      {/* MCCB シンボル */}
-      <SvgMCCB x={x + 18} y={y + h / 2} />
-      {result && <text x={x + 36} y={y + h / 2 - 4} fontSize={8} fill="#333">{result.mccbAT}AT</text>}
-      <text x={x + 36} y={y + h / 2 + 7} fontSize={7} fill="#888">{p.cableType} {sizeStr} {p.cableLength}m</text>
+      {/* ケーブル表記 (MCCB はブスバー側に移動) */}
+      <text x={x + 8} y={y + h / 2 + 1} fontSize={7} fill="#888">{p.cableType} {sizeStr} {p.cableLength}m</text>
       {/* 負荷シンボル (右端) */}
       {isMotor
         ? <SvgMotor x={x + w - 18} y={y + h / 2} r={10} />
@@ -1551,23 +1754,24 @@ function DiagramCanvas({ nodes, allResults, systemMeta, selectedId, onSelectNode
     });
   };
 
-  /* 接続線の描画 (M2-6: 折りたたみグループのノード接続を非表示) */
+  /* 接続線の描画: ブスバー+分岐ブレーカー方式 (M2-6: 折りたたみグループのノード接続を非表示) */
   const renderConnections = () => {
-    const lines = [];
+    /* 親ノードごとに子をグループ化 */
+    const parentMap = {};
     for (const node of nodes) {
       if (!node.parentId || !node.canvas || collapsedNodeIds.has(node.id)) continue;
       const parent = nodes.find(n => n.id === node.parentId);
-      if (!parent || !parent.canvas) continue;
-      const r = allResults[node.id];
-      lines.push(
-        <ConnectionLine key={`conn-${node.id}`}
-          fromCanvas={parent.canvas} toCanvas={node.canvas}
-          direction={direction} ok={r ? r.ok : null}
-          selected={selectedId === node.id || selectedId === parent.id}
-        />
-      );
+      if (!parent || !parent.canvas || collapsedNodeIds.has(parent.id)) continue;
+      if (!parentMap[parent.id]) parentMap[parent.id] = { parent, children: [] };
+      parentMap[parent.id].children.push(node);
     }
-    return lines;
+    return Object.entries(parentMap).map(([pid, { parent, children }]) => (
+      <BranchPointGroup key={`bp-${pid}`}
+        parentNode={parent} childNodes={children}
+        allResults={allResults} direction={direction}
+        selectedId={selectedId} collapsedNodeIds={collapsedNodeIds}
+      />
+    ));
   };
 
   /* モジュール描画 (M2-6: 折りたたみグループのノードを非表示) */
@@ -1831,7 +2035,8 @@ const DEFAULT_PARAMS = {
   demandFactor: 100, cableLength: 30,
   cableType: 'CVT', wiringMethod: 'ケーブルラック配線',
   ambientTemp: 40, reductionPreset: '1段 S=d 7列以上', reductionFactor: 0.70,
-  hasELCB: false, elcbSensitivity_mA: 30, groundingMethod: 'TT', groundResistance_ohm: 100
+  hasELCB: false, elcbSensitivity_mA: 30, groundingMethod: 'TT', groundResistance_ohm: 100,
+  branchLength: 0
 };
 
 /* --- 変圧器デフォルト (§19) --- */
@@ -1853,7 +2058,8 @@ const DEFAULT_TRUNK_PARAMS = {
   name: '', system: '三相3線式', voltage: 210, freq: '60Hz', supplyType: '高圧受電',
   cableLength: 10, cableType: 'CVT', wiringMethod: 'ケーブルラック配線',
   ambientTemp: 40, reductionPreset: '1段 S=d 7列以上', reductionFactor: 0.70,
-  powerFactor: 0.85, mccbATOverride: '自動', icuClass: 'standard'
+  powerFactor: 0.85, mccbATOverride: '自動', icuClass: 'standard',
+  branchLength: 0
 };
 
 /* --- 一括取込ダイアログ --- */
@@ -2835,6 +3041,29 @@ function ResultPanel({ result, params }) {
         </div>
       )}
 
+      {/* 分岐ブレーカー省略条件 (電技解釈148条4号) */}
+      {r.branchBreaker && (
+        <div style={{ borderTop: '1px solid #f0f0f0', paddingTop: 8, marginTop: 4 }}>
+          <div style={sectionTitle}>分岐ブレーカー</div>
+          <div style={detailRow}>
+            <span>判定</span>
+            <span style={{ fontWeight: 700, color: r.branchBreaker.required ? '#e65100' : '#4caf50' }}>
+              {r.branchBreaker.required ? '設置必須' : '省略可'}
+            </span>
+          </div>
+          <div style={detailRow}>
+            <span>根拠</span>
+            <span>{r.branchBreaker.rule}</span>
+          </div>
+          {r.branchBreaker.ratio != null && (
+            <div style={detailRow}>
+              <span>IW/IB 比率</span>
+              <span>{r.branchBreaker.ratio}% （IW={r.branchBreaker.IW}A / IB={r.branchBreaker.IB}AT）</span>
+            </div>
+          )}
+        </div>
+      )}
+
       {/* 電気方式/電圧 親子不一致警告 */}
       {r.systemMismatch && (
         <div style={{ borderTop: '1px solid #f0f0f0', paddingTop: 8, marginTop: 4 }}>
@@ -3157,6 +3386,11 @@ function TrunkForm({ trunkParams, setTrunkParams, onSave, onCancel, isEdit, chil
             <option value="high">高遮断型 (high)</option>
           </select>
         </RC>
+        <RC label="分岐長 [m]">
+          <input type="number" step="0.5" min="0" value={trunkParams.branchLength || 0} style={numStyle}
+            onChange={e => setTrunkParams(p => ({ ...p, branchLength: parseFloat(e.target.value) || 0 }))} />
+          <span style={{ fontSize: 10, color: '#888', marginLeft: 4 }}>分岐点〜分岐側MCCB</span>
+        </RC>
       </Sec>
       {childSummary && (
         <div style={{ fontSize: 12, color: '#666', background: '#f5f5f5', borderRadius: 4, padding: 8, marginBottom: 12 }}>
@@ -3255,6 +3489,13 @@ function TreeTable({ nodes, allResults, selectedId, onSelect, onDelete, onAddChi
           <td style={{ padding: '6px 4px', fontSize: 12, textAlign: 'right' }}>
             {r && r.Isc3 ? `${rd(r.Isc3 / 1000, 1)}kA` : '-'}
           </td>
+          <td style={{ padding: '6px 4px', fontSize: 11, textAlign: 'center' }}>
+            {r && r.branchBreaker ? (
+              <span style={{ color: r.branchBreaker.required ? '#e65100' : '#4caf50', fontWeight: 600 }}>
+                {r.branchBreaker.required ? '必須' : '省略可'}
+              </span>
+            ) : '-'}
+          </td>
           <td style={{ padding: '6px 2px', whiteSpace: 'nowrap' }}>
             {(isTr || (isTrunk && depth < 2)) && onAddChild && (
               <button onClick={e => { e.stopPropagation(); onAddChild(node); }}
@@ -3339,6 +3580,7 @@ function TreeTable({ nodes, allResults, selectedId, onSelect, onDelete, onAddChi
             <th style={{ padding: '6px 4px', textAlign: 'right', fontSize: 12 }}>e [V]</th>
             <th style={{ padding: '6px 4px', textAlign: 'left', fontSize: 12 }}>判定</th>
             <th style={{ padding: '6px 4px', textAlign: 'right', fontSize: 12 }}>Isc₃</th>
+            <th style={{ padding: '6px 4px', textAlign: 'center', fontSize: 12 }}>分岐CB</th>
             <th style={{ padding: '6px 4px', fontSize: 12 }}></th>
           </tr>
         </thead>
@@ -3737,29 +3979,109 @@ function genDiagramHTML(nodes, allResults, systemMeta) {
   const svgW = maxX - minX;
   const svgH = maxY - minY;
 
-  /* 接続線 SVG */
+  /* 接続線 SVG: ブスバー+分岐ブレーカー方式 */
   const dir = DIRECTIONS[direction];
+  const isHoriz = dir.outPort === 'right';
+  const BB_OFFSET = 30;
+  const MCCB_OFFSET = 20;
+  const BB_THICK = 4;
   let connSvg = '';
+
+  /* 親ノードごとに子をグループ化 */
+  const parentMap = {};
   for (const n of positioned) {
     if (!n.parentId || !n.canvas) continue;
     const parent = positioned.find(p => p.id === n.parentId);
     if (!parent || !parent.canvas) continue;
-    let fx, fy, tx, ty;
-    if (dir.outPort === 'right') {
-      fx = parent.canvas.x + parent.canvas.width; fy = parent.canvas.y + parent.canvas.height / 2;
-      tx = n.canvas.x; ty = n.canvas.y + n.canvas.height / 2;
+    if (!parentMap[parent.id]) parentMap[parent.id] = { parent, children: [] };
+    parentMap[parent.id].children.push(n);
+  }
+
+  for (const [, { parent: pNode, children }] of Object.entries(parentMap)) {
+    const pc = pNode.canvas;
+    const px = isHoriz ? pc.x + pc.width : pc.x + pc.width / 2;
+    const py = isHoriz ? pc.y + pc.height / 2 : pc.y + pc.height;
+
+    const childPorts = children.map(c => ({
+      node: c,
+      x: isHoriz ? c.canvas.x : c.canvas.x + c.canvas.width / 2,
+      y: isHoriz ? c.canvas.y + c.canvas.height / 2 : c.canvas.y
+    }));
+
+    /* ブスバー範囲 */
+    let bbStart, bbEnd, bbMain;
+    if (isHoriz) {
+      bbMain = px + BB_OFFSET;
+      const ys = childPorts.map(cp => cp.y);
+      bbStart = Math.min(py, ...ys) - 2;
+      bbEnd = Math.max(py, ...ys) + 2;
     } else {
-      fx = parent.canvas.x + parent.canvas.width / 2; fy = parent.canvas.y + parent.canvas.height;
-      tx = n.canvas.x + n.canvas.width / 2; ty = n.canvas.y;
+      bbMain = py + BB_OFFSET;
+      const xs = childPorts.map(cp => cp.x);
+      bbStart = Math.min(px, ...xs) - 2;
+      bbEnd = Math.max(px, ...xs) + 2;
     }
-    const mx = (fx + tx) / 2, my = (fy + ty) / 2;
-    const r = allResults[n.id];
-    const col = r ? (r.ok ? '#333' : '#c00') : '#999';
-    const dash = r && !r.ok ? 'stroke-dasharray="4 2"' : '';
-    const d = dir.outPort === 'right'
-      ? `M${fx},${fy} C${mx},${fy} ${mx},${ty} ${tx},${ty}`
-      : `M${fx},${fy} C${fx},${my} ${tx},${my} ${tx},${ty}`;
-    connSvg += `<path d="${d}" fill="none" stroke="${col}" stroke-width="1.5" ${dash}/>\n`;
+
+    /* 親→ブスバー */
+    if (isHoriz) {
+      connSvg += `<line x1="${px}" y1="${py}" x2="${bbMain}" y2="${py}" stroke="#666" stroke-width="1.5"/>\n`;
+      connSvg += `<rect x="${bbMain - BB_THICK / 2}" y="${bbStart}" width="${BB_THICK}" height="${bbEnd - bbStart}" fill="#333" rx="1"/>\n`;
+    } else {
+      connSvg += `<line x1="${px}" y1="${py}" x2="${px}" y2="${bbMain}" stroke="#666" stroke-width="1.5"/>\n`;
+      connSvg += `<rect x="${bbStart}" y="${bbMain - BB_THICK / 2}" width="${bbEnd - bbStart}" height="${BB_THICK}" fill="#333" rx="1"/>\n`;
+    }
+
+    /* 各子への接続: ブスバー → 分岐MCCB → 子 */
+    for (const cp of childPorts) {
+      const r = allResults[cp.node.id];
+      const col = r ? (r.ok ? '#333' : '#c00') : '#999';
+      const dash = r && !r.ok ? ' stroke-dasharray="4 2"' : '';
+      const bb = r && r.branchBreaker;
+      const bbRequired = bb ? bb.required : true;
+      const bbOmittable = bb && !bb.required && bb.rule !== '—';
+
+      if (isHoriz) {
+        const mccbX = bbMain + MCCB_OFFSET;
+        const mccbY = cp.y;
+        /* ブスバー → MCCB */
+        connSvg += `<line x1="${bbMain + BB_THICK / 2}" y1="${mccbY}" x2="${mccbX - 10}" y2="${mccbY}" stroke="${col}" stroke-width="1.5"${dash}/>\n`;
+        /* MCCB シンボル */
+        if (bbRequired) {
+          connSvg += `<rect x="${mccbX - 10}" y="${mccbY - 7}" width="20" height="14" fill="#fff" stroke="#333" stroke-width="1.2"/>\n`;
+          connSvg += `<line x1="${mccbX - 5}" y1="${mccbY - 7}" x2="${mccbX + 5}" y2="${mccbY + 7}" stroke="#333" stroke-width="1.2"/>\n`;
+        } else if (bbOmittable) {
+          connSvg += `<rect x="${mccbX - 10}" y="${mccbY - 7}" width="20" height="14" fill="#fff" stroke="#999" stroke-width="1" stroke-dasharray="3 2" opacity="0.4"/>\n`;
+          connSvg += `<line x1="${mccbX - 5}" y1="${mccbY - 7}" x2="${mccbX + 5}" y2="${mccbY + 7}" stroke="#999" stroke-width="1" stroke-dasharray="3 2" opacity="0.4"/>\n`;
+        }
+        /* AT ラベル */
+        if (r && r.mccbAT) {
+          connSvg += `<text x="${mccbX}" y="${mccbY - 10}" font-size="7" text-anchor="middle" fill="${bbOmittable ? '#aaa' : '#333'}">${r.mccbAT}AT</text>\n`;
+        }
+        if (bbOmittable) {
+          connSvg += `<text x="${mccbX}" y="${mccbY + 18}" font-size="6" text-anchor="middle" fill="#999">省略可</text>\n`;
+        }
+        /* MCCB → 子 */
+        connSvg += `<line x1="${mccbX + 10}" y1="${mccbY}" x2="${cp.x}" y2="${cp.y}" stroke="${col}" stroke-width="1.5"${dash}/>\n`;
+      } else {
+        const mccbX = cp.x;
+        const mccbY = bbMain + MCCB_OFFSET;
+        connSvg += `<line x1="${mccbX}" y1="${bbMain + BB_THICK / 2}" x2="${mccbX}" y2="${mccbY - 7}" stroke="${col}" stroke-width="1.5"${dash}/>\n`;
+        if (bbRequired) {
+          connSvg += `<rect x="${mccbX - 10}" y="${mccbY - 7}" width="20" height="14" fill="#fff" stroke="#333" stroke-width="1.2"/>\n`;
+          connSvg += `<line x1="${mccbX - 5}" y1="${mccbY - 7}" x2="${mccbX + 5}" y2="${mccbY + 7}" stroke="#333" stroke-width="1.2"/>\n`;
+        } else if (bbOmittable) {
+          connSvg += `<rect x="${mccbX - 10}" y="${mccbY - 7}" width="20" height="14" fill="#fff" stroke="#999" stroke-width="1" stroke-dasharray="3 2" opacity="0.4"/>\n`;
+          connSvg += `<line x1="${mccbX - 5}" y1="${mccbY - 7}" x2="${mccbX + 5}" y2="${mccbY + 7}" stroke="#999" stroke-width="1" stroke-dasharray="3 2" opacity="0.4"/>\n`;
+        }
+        if (r && r.mccbAT) {
+          connSvg += `<text x="${mccbX + 14}" y="${mccbY + 3}" font-size="7" text-anchor="start" fill="${bbOmittable ? '#aaa' : '#333'}">${r.mccbAT}AT</text>\n`;
+        }
+        if (bbOmittable) {
+          connSvg += `<text x="${mccbX - 14}" y="${mccbY + 3}" font-size="6" text-anchor="end" fill="#999">省略可</text>\n`;
+        }
+        connSvg += `<line x1="${mccbX}" y1="${mccbY + 7}" x2="${cp.x}" y2="${cp.y}" stroke="${col}" stroke-width="1.5"${dash}/>\n`;
+      }
+    }
   }
 
   /* モジュール SVG */
@@ -3790,13 +4112,10 @@ function genDiagramHTML(nodes, allResults, systemMeta) {
       const bg = ok === false ? '#fff5f5' : '#fff';
       const sizeStr = r ? `${r.size}${r.parallel > 1 ? '×' + r.parallel : ''}` : '';
       modSvg += `<rect x="${x}" y="${y}" width="${w}" height="${h}" rx="4" fill="${bg}" stroke="${border}" stroke-width="1.5"/>`;
-      /* MCCB */
-      const mx = x + 18, my = y + h / 2, mw = 20, mh = 14;
-      modSvg += `<rect x="${mx - mw / 2}" y="${my - mh / 2}" width="${mw}" height="${mh}" fill="#fff" stroke="#333" stroke-width="1.2"/>`;
-      modSvg += `<line x1="${mx - mw / 4}" y1="${my - mh / 2}" x2="${mx + mw / 4}" y2="${my + mh / 2}" stroke="#333" stroke-width="1.2"/>`;
-      if (r) modSvg += `<text x="${x + 36}" y="${my - 6}" font-size="8" fill="#333">${r.mccbAT}AT</text>`;
-      modSvg += `<text x="${x + 36}" y="${my + 5}" font-size="8" fill="#555">${esc(tr.cableType)} ${sizeStr}</text>`;
-      modSvg += `<text x="${x + 36}" y="${my + 15}" font-size="7" fill="#888">${tr.cableLength}m</text>`;
+      /* ケーブル表記 (MCCB はブスバー側に移動) */
+      const my = y + h / 2;
+      modSvg += `<text x="${x + 8}" y="${my - 4}" font-size="8" fill="#555">${esc(tr.cableType)} ${sizeStr}</text>`;
+      modSvg += `<text x="${x + 8}" y="${my + 7}" font-size="7" fill="#888">${tr.cableLength}m</text>`;
       modSvg += `<text x="${x + w / 2}" y="${y - 5}" font-size="10" text-anchor="middle" font-weight="600" fill="#333">${esc(tr.name || '幹線')}</text>`;
       if (r) modSvg += `<text x="${x + w - 6}" y="${my + 3}" font-size="8" text-anchor="end" fill="#666">${rd(r.dI, 1)}A  e=${r.vdPercent}%</text>`;
       if (ok != null) {
@@ -3811,12 +4130,9 @@ function genDiagramHTML(nodes, allResults, systemMeta) {
       const bg = ok === false ? '#fff5f5' : '#fff';
       const sizeStr = r ? `${r.size}${r.parallel > 1 ? '×' + r.parallel : ''}` : '';
       modSvg += `<rect x="${x}" y="${y}" width="${w}" height="${h}" rx="4" fill="${bg}" stroke="${border}" stroke-width="1.5"/>`;
-      /* MCCB */
-      const mx = x + 18, my = y + h / 2, mw = 20, mh = 14;
-      modSvg += `<rect x="${mx - mw / 2}" y="${my - mh / 2}" width="${mw}" height="${mh}" fill="#fff" stroke="#333" stroke-width="1.2"/>`;
-      modSvg += `<line x1="${mx - mw / 4}" y1="${my - mh / 2}" x2="${mx + mw / 4}" y2="${my + mh / 2}" stroke="#333" stroke-width="1.2"/>`;
-      if (r) modSvg += `<text x="${x + 36}" y="${my - 4}" font-size="8" fill="#333">${r.mccbAT}AT</text>`;
-      modSvg += `<text x="${x + 36}" y="${my + 7}" font-size="7" fill="#888">${esc(p.cableType)} ${sizeStr} ${p.cableLength}m</text>`;
+      /* ケーブル表記 (MCCB はブスバー側に移動) */
+      const my = y + h / 2;
+      modSvg += `<text x="${x + 8}" y="${my + 1}" font-size="7" fill="#888">${esc(p.cableType)} ${sizeStr} ${p.cableLength}m</text>`;
       /* 負荷シンボル */
       if (p.circuitType === '電動機') {
         modSvg += `<circle cx="${x + w - 18}" cy="${my}" r="10" fill="#e3f2fd" stroke="#1565c0" stroke-width="1.5"/>`;
@@ -3844,21 +4160,26 @@ function genDiagramHTML(nodes, allResults, systemMeta) {
   `;
 
   /* 凡例 */
-  const legX = minX + 10, legY = maxY - 80;
+  const legX = minX + 10, legY = maxY - 100;
   const legendSvg = `
-    <rect x="${legX}" y="${legY}" width="160" height="70" fill="#fff" stroke="#999" stroke-width="0.5" rx="2"/>
+    <rect x="${legX}" y="${legY}" width="200" height="92" fill="#fff" stroke="#999" stroke-width="0.5" rx="2"/>
     <text x="${legX + 6}" y="${legY + 12}" font-size="8" font-weight="700" fill="#333">凡例</text>
     <rect x="${legX + 6}" y="${legY + 18}" width="14" height="10" fill="#fff" stroke="#333" stroke-width="1"/>
     <line x1="${legX + 9}" y1="${legY + 18}" x2="${legX + 17}" y2="${legY + 28}" stroke="#333" stroke-width="1"/>
-    <text x="${legX + 26}" y="${legY + 27}" font-size="7" fill="#333">MCCB（配線用遮断器）</text>
-    <circle cx="${legX + 13}" cy="${legY + 38}" r="6" fill="none" stroke="#333" stroke-width="1"/>
-    <circle cx="${legX + 19}" cy="${legY + 38}" r="6" fill="none" stroke="#333" stroke-width="1"/>
-    <text x="${legX + 32}" y="${legY + 41}" font-size="7" fill="#333">変圧器</text>
-    <circle cx="${legX + 13}" cy="${legY + 54}" r="6" fill="#e3f2fd" stroke="#1565c0" stroke-width="1"/>
-    <text x="${legX + 13}" y="${legY + 57}" font-size="6" text-anchor="middle" font-weight="700" fill="#1565c0">M</text>
-    <text x="${legX + 26}" y="${legY + 57}" font-size="7" fill="#333">電動機</text>
-    <polygon points="${legX + 90},${legY + 20} ${legX + 98},${legY + 30} ${legX + 82},${legY + 30}" fill="#fff3e0" stroke="#e65100" stroke-width="1"/>
-    <text x="${legX + 104}" y="${legY + 27}" font-size="7" fill="#333">一般負荷</text>
+    <text x="${legX + 26}" y="${legY + 27}" font-size="7" fill="#333">分岐ブレーカー（MCCB）</text>
+    <rect x="${legX + 106}" y="${legY + 18}" width="14" height="10" fill="#fff" stroke="#999" stroke-width="1" stroke-dasharray="3 2" opacity="0.4"/>
+    <line x1="${legX + 109}" y1="${legY + 18}" x2="${legX + 117}" y2="${legY + 28}" stroke="#999" stroke-width="1" stroke-dasharray="3 2" opacity="0.4"/>
+    <text x="${legX + 126}" y="${legY + 27}" font-size="7" fill="#999">省略可</text>
+    <rect x="${legX + 6}" y="${legY + 34}" width="20" height="4" fill="#333" rx="1"/>
+    <text x="${legX + 32}" y="${legY + 39}" font-size="7" fill="#333">ブスバー（母線）</text>
+    <circle cx="${legX + 13}" cy="${legY + 50}" r="6" fill="none" stroke="#333" stroke-width="1"/>
+    <circle cx="${legX + 19}" cy="${legY + 50}" r="6" fill="none" stroke="#333" stroke-width="1"/>
+    <text x="${legX + 32}" y="${legY + 53}" font-size="7" fill="#333">変圧器</text>
+    <circle cx="${legX + 13}" cy="${legY + 66}" r="6" fill="#e3f2fd" stroke="#1565c0" stroke-width="1"/>
+    <text x="${legX + 13}" y="${legY + 69}" font-size="6" text-anchor="middle" font-weight="700" fill="#1565c0">M</text>
+    <text x="${legX + 26}" y="${legY + 69}" font-size="7" fill="#333">電動機</text>
+    <polygon points="${legX + 90},${legY + 44} ${legX + 98},${legY + 54} ${legX + 82},${legY + 54}" fill="#fff3e0" stroke="#e65100" stroke-width="1"/>
+    <text x="${legX + 104}" y="${legY + 51}" font-size="7" fill="#333">一般負荷</text>
   `;
 
   return `<!DOCTYPE html>
@@ -4276,10 +4597,10 @@ function App() {
             if (existingIds.has(n.id)) { newId = genId(); idMap[n.id] = newId; }
             /* M2-3: 新フィールドのデフォルト補完 */
             if (n.type === 'load' && n.load) {
-              n.load = { ...n.load, icuClass: n.load.icuClass || 'standard', hasELCB: n.load.hasELCB || false, elcbSensitivity_mA: n.load.elcbSensitivity_mA || 30, groundingMethod: n.load.groundingMethod || 'TT', groundResistance_ohm: n.load.groundResistance_ohm || 100 };
+              n.load = { ...n.load, icuClass: n.load.icuClass || 'standard', hasELCB: n.load.hasELCB || false, elcbSensitivity_mA: n.load.elcbSensitivity_mA || 30, groundingMethod: n.load.groundingMethod || 'TT', groundResistance_ohm: n.load.groundResistance_ohm || 100, branchLength: n.load.branchLength || 0 };
             }
             if (n.type === 'trunk' && n.trunk) {
-              n.trunk = { ...n.trunk, icuClass: n.trunk.icuClass || 'standard' };
+              n.trunk = { ...n.trunk, icuClass: n.trunk.icuClass || 'standard', branchLength: n.trunk.branchLength || 0 };
             }
             if (n.type === 'transformer' && n.transformer) {
               n.transformer = { ...n.transformer, hvSystem: { cableType: null, cableSize_mm2: null, totalCableLength_km: null, capacitance_uF_per_km: null, vcbTripTime_s: 1.0, ...(n.transformer.hvSystem || {}) } };
@@ -4551,6 +4872,11 @@ function App() {
                     <option value="standard">経済型 (standard)</option>
                     <option value="high">高遮断型 (high)</option>
                   </select>
+                </RC>
+                <RC label="分岐長 [m]">
+                  <input type="number" step="0.5" min="0" value={params.branchLength || 0} style={numStyle}
+                    onChange={e => setParams(p => ({ ...p, branchLength: parseFloat(e.target.value) || 0 }))} />
+                  <span style={{ fontSize: 10, color: '#888', marginLeft: 4 }}>分岐点〜分岐側MCCB</span>
                 </RC>
               </Sec>
 
