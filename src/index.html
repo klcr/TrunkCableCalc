@@ -635,7 +635,8 @@ function runTrunkCalc(trunk, agg) {
 
     return {
       ok: true, size: sz, parallel: 1, dI: rd(totalI), totalI: rd(totalI),
-      sumIM: rd(sumIM), sumIH: rd(sumIH), hasMotor, sizingI: rd(sizingI), mccbAT,
+      sumIM: rd(sumIM), sumIH: rd(sumIH), motorI: rd(sumIM), generalI: rd(sumIH),
+      hasMotor, sizingI: rd(sizingI), mccbAT,
       baseAmpacity: bA, tempFactor: rd(tF, 3), reductionFactor: trunk.reductionFactor,
       effectiveAmpacity: rd(eA), Z: rd(Z, 4), K,
       vd: rd(vd), vdPercent: rd(vdP),
@@ -658,7 +659,8 @@ function runTrunkCalc(trunk, agg) {
       if (eA2 >= sizingI && vdP2 <= allowVdP && protOK2) {
         return {
           ok: true, size: sz2, parallel: 2, dI: rd(totalI), totalI: rd(totalI),
-          sumIM: rd(sumIM), sumIH: rd(sumIH), hasMotor, sizingI: rd(sizingI), mccbAT,
+          sumIM: rd(sumIM), sumIH: rd(sumIH), motorI: rd(sumIM), generalI: rd(sumIH),
+          hasMotor, sizingI: rd(sizingI), mccbAT,
           baseAmpacity: bA2 * 2, tempFactor: rd(tF, 3), reductionFactor: trunk.reductionFactor,
           effectiveAmpacity: rd(eA2), Z: rd(Z2, 4), K,
           vd: rd(vd2), vdPercent: rd(vdP2),
@@ -668,7 +670,8 @@ function runTrunkCalc(trunk, agg) {
       }
       return {
         ok: false, size: sz2, parallel: 2, dI: rd(totalI), totalI: rd(totalI),
-        sumIM: rd(sumIM), sumIH: rd(sumIH), hasMotor, sizingI: rd(sizingI), mccbAT,
+        sumIM: rd(sumIM), sumIH: rd(sumIH), motorI: rd(sumIM), generalI: rd(sumIH),
+        hasMotor, sizingI: rd(sizingI), mccbAT,
         baseAmpacity: bA2 * 2, tempFactor: rd(tF, 3), reductionFactor: trunk.reductionFactor,
         effectiveAmpacity: rd(eA2), Z: rd(Z2, 4), K,
         vd: rd(vd2), vdPercent: rd(vdP2),
@@ -690,7 +693,8 @@ function runTrunkCalc(trunk, agg) {
 
   return {
     ok: false, size: sz, parallel: 1, dI: rd(totalI), totalI: rd(totalI),
-    sumIM: rd(sumIM), sumIH: rd(sumIH), hasMotor, sizingI: rd(sizingI), mccbAT,
+    sumIM: rd(sumIM), sumIH: rd(sumIH), motorI: rd(sumIM), generalI: rd(sumIH),
+    hasMotor, sizingI: rd(sizingI), mccbAT,
     baseAmpacity: bA || 0, tempFactor: rd(tF, 3), reductionFactor: trunk.reductionFactor,
     effectiveAmpacity: rd(eA), Z: rd(Z, 4), K,
     vd: rd(vd), vdPercent: rd(vdP),
@@ -919,9 +923,11 @@ function checkELCB(loadParams, Ig_lv) {
 
 /**
  * calculateAll — 全ノード一括計算
+ * @param {Array} feedLinks — feedLink 接続リスト [{id, fromNodeId, toNodeId, label}]
  */
-function calculateAll(nodes) {
+function calculateAll(nodes, feedLinks) {
   const results = {};
+  const fLinks = feedLinks || [];
 
   /* 1. ボトムアップ: 全 load ノードを計算 */
   for (const n of nodes) {
@@ -934,6 +940,21 @@ function calculateAll(nodes) {
     .sort((a, b) => b.depth - a.depth);
   for (const { node } of trunks) {
     const agg = aggregateCurrents(nodes, node.id, results);
+    /* feedLink: このtrunkに接続されている外部負荷の電流を加算 */
+    for (const fl of fLinks) {
+      if (fl.toNodeId === node.id) {
+        const fromR = results[fl.fromNodeId];
+        if (!fromR) continue;
+        const fromNode = nodes.find(n => n.id === fl.fromNodeId);
+        if (!fromNode) continue;
+        const dI = fromR.dI || 0;
+        if (fromNode.type === 'load' && fromNode.load?.circuitType === '電動機') agg.sumIM += dI;
+        else if (fromNode.type === 'trunk') { agg.sumIM += fromR.motorI || 0; agg.sumIH += fromR.generalI || 0; }
+        else agg.sumIH += dI;
+        agg.totalI = agg.sumIM + agg.sumIH;
+        agg.hasMotor = agg.sumIM > 0;
+      }
+    }
     const r = runTrunkCalc(node.trunk, agg);
     if (r) results[node.id] = r;
   }
@@ -1044,6 +1065,22 @@ function calculateAll(nodes) {
     r.branchBreaker = checkBranchBreaker(IW, IB, cableLength, hasBranchLine);
     r.branchBreaker.IW = rd(IW);
     r.branchBreaker.IB = IB;
+  }
+
+  /* 11. feedLink 接続情報アノテーション */
+  for (const fl of fLinks) {
+    const fromR = results[fl.fromNodeId];
+    const toR = results[fl.toNodeId];
+    const fromNode = nodes.find(n => n.id === fl.fromNodeId);
+    const toNode = nodes.find(n => n.id === fl.toNodeId);
+    if (fromR && fromNode) {
+      if (!fromR.feedTo) fromR.feedTo = [];
+      fromR.feedTo.push({ toNodeId: fl.toNodeId, toName: toNode?.trunk?.name || toNode?.trunk?.branchName || '幹線', label: fl.label });
+    }
+    if (toR && toNode) {
+      if (!toR.feedFrom) toR.feedFrom = [];
+      toR.feedFrom.push({ fromNodeId: fl.fromNodeId, fromName: fromNode?.load?.loadName || fromNode?.trunk?.name || '負荷', label: fl.label });
+    }
   }
 
   return results;
@@ -1603,6 +1640,12 @@ function ModuleTrunk({ node, result, canvas, selected, mode, direction, onMouseD
       )}
       {/* 電気方式 */}
       <text x={x + 8} y={y + 58} fontSize={7} fill="#aaa">{tr.system} {tr.voltage}V {tr.freq}</text>
+      {/* feedFrom アノテーション */}
+      {result && result.feedFrom && result.feedFrom.length > 0 && (
+        <text x={x + w - 4} y={y + h - 3} fontSize={6} textAnchor="end" fill="#e65100" fontWeight={600}>
+          ← {result.feedFrom.map(ff => ff.fromName).join(', ')}
+        </text>
+      )}
       {mode === 'edit' && (
         <>
           <SvgPort x={inX} y={inY} type="in" onMouseDown={e => { e.stopPropagation(); onPortMouseDown && onPortMouseDown(node.id, 'in', e); }} />
@@ -1654,16 +1697,28 @@ function ModuleLoadNode({ node, result, canvas, selected, mode, direction, onMou
       )}
       {/* 電気方式 */}
       <text x={x + 8} y={y + 58} fontSize={7} fill="#aaa">{p.system} {p.voltage}V</text>
+      {/* feedTo/feedFrom アノテーション */}
+      {result && result.feedTo && result.feedTo.length > 0 && (
+        <text x={x + w - 4} y={y + h - 3} fontSize={6} textAnchor="end" fill="#e65100" fontWeight={600}>
+          → {result.feedTo.map(ft => ft.toName).join(', ')}
+        </text>
+      )}
       {mode === 'edit' && (
         <SvgPort x={inX} y={inY} type="in" onMouseDown={e => { e.stopPropagation(); onPortMouseDown && onPortMouseDown(node.id, 'in', e); }} />
       )}
+      {/* 2次側出力ポート（feedLink 接続用） */}
+      {mode === 'edit' && (() => {
+        const outX = dir.outPort === 'right' ? x + w : x + w / 2;
+        const outY = dir.outPort === 'right' ? y + h / 2 : y + h;
+        return <SvgPort x={outX} y={outY} type="out" onMouseDown={e => { e.stopPropagation(); onPortMouseDown && onPortMouseDown(node.id, 'out', e); }} />;
+      })()}
     </g>
   );
 }
 
 /* === DIAGRAM: CANVAS COMPONENT (M2-4-1, M2-4-5, M2-4-6) === */
 
-function DiagramCanvas({ nodes, allResults, systemMeta, selectedId, onSelectNode, mode, onNodesChange, groups, crossLinks, onToggleGroupCollapse }) {
+function DiagramCanvas({ nodes, allResults, systemMeta, selectedId, onSelectNode, mode, onNodesChange, groups, crossLinks, feedLinks, onToggleGroupCollapse }) {
   const direction = (systemMeta && systemMeta.diagramDirection) || 'horizontal';
   const svgRef = React.useRef(null);
   const [vt, setVt] = React.useState({ x: 0, y: 0, scale: 1 });
@@ -1970,6 +2025,48 @@ function DiagramCanvas({ nodes, allResults, systemMeta, selectedId, onSelectNode
     return elements;
   };
 
+  /* feedLink 描画: ノード間の給電接続 */
+  const renderFeedLinks = () => {
+    const fLinks = feedLinks || [];
+    return fLinks.map(fl => {
+      const fromNode = nodes.find(n => n.id === fl.fromNodeId);
+      const toNode = nodes.find(n => n.id === fl.toNodeId);
+      if (!fromNode || !toNode || !fromNode.canvas || !toNode.canvas) return null;
+      if (collapsedNodeIds.has(fromNode.id) || collapsedNodeIds.has(toNode.id)) return null;
+      const dir = DIRECTIONS[direction];
+      /* from: 出力ポート（2次側） */
+      const fx = dir.outPort === 'right' ? fromNode.canvas.x + fromNode.canvas.width : fromNode.canvas.x + fromNode.canvas.width / 2;
+      const fy = dir.outPort === 'right' ? fromNode.canvas.y + fromNode.canvas.height / 2 : fromNode.canvas.y + fromNode.canvas.height;
+      /* to: 入力ポート（1次側） */
+      const tx = dir.inPort === 'left' ? toNode.canvas.x : toNode.canvas.x + toNode.canvas.width / 2;
+      const ty = dir.inPort === 'left' ? toNode.canvas.y + toNode.canvas.height / 2 : toNode.canvas.y;
+      const mx = (fx + tx) / 2;
+      const my = (fy + ty) / 2;
+      const fromName = fromNode.load?.loadName || fromNode.trunk?.name || '負荷';
+      const toName = toNode.trunk?.name || toNode.trunk?.branchName || '幹線';
+      const labelText = fl.label || `${fromName} → ${toName}`;
+      return (
+        <g key={'fl-' + fl.id}>
+          <defs>
+            <marker id={'fl-arrow-' + fl.id} markerWidth="8" markerHeight="6" refX="7" refY="3" orient="auto">
+              <path d="M0,0 L8,3 L0,6 Z" fill="#e65100" />
+            </marker>
+          </defs>
+          <path d={`M${fx},${fy} C${mx},${fy} ${mx},${ty} ${tx},${ty}`}
+            fill="none" stroke="#e65100" strokeWidth={2} strokeDasharray="6 3"
+            markerEnd={`url(#fl-arrow-${fl.id})`} />
+          <text x={mx} y={my - 6} fontSize={8} textAnchor="middle" fill="#e65100" fontWeight={600}>
+            {labelText}
+          </text>
+          {/* from ノード側の接続点マーカー */}
+          <circle cx={fx} cy={fy} r={4} fill="#e65100" stroke="#fff" strokeWidth={1} />
+          {/* to ノード側の接続点マーカー */}
+          <circle cx={tx} cy={ty} r={4} fill="#e65100" stroke="#fff" strokeWidth={1} />
+        </g>
+      );
+    });
+  };
+
   /* M2-6: クロスリンク描画 */
   const renderCrossLinks = () => {
     const grps = groups || [];
@@ -2030,6 +2127,7 @@ function DiagramCanvas({ nodes, allResults, systemMeta, selectedId, onSelectNode
           {renderGroupContainers()}
           {renderConnections()}
           {renderCrossLinks()}
+          {renderFeedLinks()}
           {renderModules()}
           {renderWiringLine()}
         </g>
@@ -3331,7 +3429,7 @@ function TransformerForm({ trParams, setTrParams, onSave, onCancel, isEdit }) {
         </RC>
         <RC label="二次電圧 [V]">
           <select value={trParams.secondaryV} style={selStyle} onChange={e => setTrParams(p => ({ ...p, secondaryV: Number(e.target.value) }))}>
-            <option value={105}>105</option><option value={210}>210</option><option value={420}>420</option>
+            <option value={100}>100</option><option value={105}>105</option><option value={200}>200</option><option value={210}>210</option><option value={400}>400</option><option value={415}>415</option><option value={420}>420</option><option value={440}>440</option>
           </select>
         </RC>
         <RC label="%Z">
@@ -3539,8 +3637,80 @@ function TrunkForm({ trunkParams, setTrunkParams, onSave, onCancel, isEdit, chil
 }
 
 /* --- TreeTable 登録一覧ツリー表示 (§12) --- */
-function TreeTable({ nodes, allResults, selectedId, onSelect, onDelete, onAddChild, groups, crossLinks, onToggleGroupCollapse }) {
+function TreeTable({ nodes, allResults, selectedId, onSelect, onDelete, onAddChild, onMoveNode, groups, crossLinks, onToggleGroupCollapse }) {
   const [collapsedGroups, setCollapsedGroups] = React.useState({});
+
+  /* --- ドラッグ&ドロップ状態 --- */
+  const [dragState, setDragState] = React.useState(null); /* { dragId, overTargetId, insertPos } */
+  const dragRef = React.useRef(null);
+
+  const handleDragStart = (e, nodeId) => {
+    const node = nodes.find(n => n.id === nodeId);
+    if (!node || node.type === 'transformer') return;
+    e.dataTransfer.effectAllowed = 'move';
+    e.dataTransfer.setData('text/plain', nodeId);
+    dragRef.current = nodeId;
+    setDragState({ dragId: nodeId, overTargetId: null, insertPos: null });
+    document.body.style.userSelect = 'none';
+  };
+  const handleDragEnd = () => {
+    dragRef.current = null;
+    setDragState(null);
+    document.body.style.userSelect = '';
+  };
+  const handleDragOver = (e, targetId) => {
+    e.preventDefault();
+    e.dataTransfer.dropEffect = 'move';
+    if (!dragRef.current || dragRef.current === targetId) return;
+    const targetNode = nodes.find(n => n.id === targetId);
+    if (!targetNode) return;
+    /* 挿入位置をマウスY座標で判定（上半分=before, 下半分=after） */
+    const rect = e.currentTarget.getBoundingClientRect();
+    const y = e.clientY - rect.top;
+    const pos = y < rect.height / 2 ? 'before' : 'after';
+    setDragState(prev => prev ? { ...prev, overTargetId: targetId, insertPos: pos } : null);
+  };
+  const handleDragLeave = (e) => {
+    /* relatedTarget が子要素の場合は無視 */
+    if (e.currentTarget.contains(e.relatedTarget)) return;
+    setDragState(prev => prev ? { ...prev, overTargetId: null, insertPos: null } : null);
+  };
+  const handleDrop = (e, targetId) => {
+    e.preventDefault();
+    if (!dragRef.current || dragRef.current === targetId) { handleDragEnd(); return; }
+    const dragId = dragRef.current;
+    const dragNode = nodes.find(n => n.id === dragId);
+    const targetNode = nodes.find(n => n.id === targetId);
+    if (!dragNode || !targetNode) { handleDragEnd(); return; }
+
+    /* ドロップ先の親を決定 */
+    let newParentId, insertIndex;
+    const pos = dragState?.insertPos || 'after';
+
+    if (targetNode.type === 'transformer') {
+      /* トランスの上にドロップ: そのトランス配下の先頭に */
+      handleDragEnd(); return; /* トランスへの直接ドロップは無効 */
+    }
+
+    /* 同レベルの兄弟ノードとして挿入 */
+    newParentId = targetNode.parentId;
+    const siblings = getChildren(nodes, newParentId).filter(n => n.id !== dragId);
+    const targetIdx = siblings.findIndex(n => n.id === targetId);
+    insertIndex = pos === 'before' ? targetIdx : targetIdx + 1;
+
+    /* バリデーション: trunk の子にload、transformer の子に trunk のみ許可 */
+    const parent = nodes.find(n => n.id === newParentId);
+    if (!parent) { handleDragEnd(); return; }
+    if (parent.type === 'transformer' && dragNode.type !== 'trunk') { handleDragEnd(); return; }
+    if (parent.type === 'trunk') {
+      const parentDepth = getDepth(nodes, parent.id);
+      if (dragNode.type === 'load' && parentDepth > 2) { handleDragEnd(); return; }
+      if (dragNode.type === 'trunk' && parentDepth > 1) { handleDragEnd(); return; }
+    }
+
+    if (onMoveNode) onMoveNode(dragId, newParentId, insertIndex);
+    handleDragEnd();
+  };
 
   if (nodes.length === 0) return (
     <div style={{ color: '#999', padding: 16, fontSize: 13 }}>
@@ -3581,12 +3751,34 @@ function TreeTable({ nodes, allResults, selectedId, onSelect, onDelete, onAddChi
       : isTrunk ? `${node.trunk?.system || ''} ${node.trunk?.voltage || ''}V`
       : `${node.load?.system || ''} ${node.load?.voltage || ''}V`;
     const cType = isTrunk ? (node.trunk?.cableType || '') : (node.load?.cableType || '');
+    const isDragging = dragState && dragState.dragId === node.id;
+    const isDropTarget = dragState && dragState.overTargetId === node.id && dragState.dragId !== node.id;
+    const canDrag = !isTr; /* トランス以外はドラッグ可能 */
 
     return (
       <React.Fragment key={node.id}>
         <tr onClick={() => onSelect(node)}
-          style={{ background: bgColor, cursor: 'pointer', borderBottom: '1px solid #eee' }}>
+          draggable={canDrag}
+          onDragStart={canDrag ? (e) => handleDragStart(e, node.id) : undefined}
+          onDragEnd={canDrag ? handleDragEnd : undefined}
+          onDragOver={!isTr ? (e) => handleDragOver(e, node.id) : undefined}
+          onDragLeave={!isTr ? handleDragLeave : undefined}
+          onDrop={!isTr ? (e) => handleDrop(e, node.id) : undefined}
+          style={{
+            background: isDragging ? '#e3f2fd' : bgColor,
+            cursor: 'pointer', borderBottom: '1px solid #eee',
+            opacity: isDragging ? 0.5 : 1,
+            position: 'relative',
+            borderTop: isDropTarget && dragState.insertPos === 'before' ? '3px solid #1976d2' : undefined,
+            borderBottom: isDropTarget && dragState.insertPos === 'after' ? '3px solid #1976d2' : '1px solid #eee'
+          }}>
           <td style={{ padding: '6px 4px', paddingLeft: 8 + depth * 20, fontSize: 12, whiteSpace: 'nowrap' }}>
+            {canDrag && (
+              <span style={{
+                display: 'inline-block', cursor: 'grab', color: '#bbb', marginRight: 4,
+                fontSize: 11, verticalAlign: 'middle', lineHeight: 1
+              }} title="ドラッグで並べ替え">⠿</span>
+            )}
             <span style={{
               display: 'inline-block', padding: '1px 4px', borderRadius: 3, fontSize: 11,
               fontWeight: 700, marginRight: 4,
@@ -3597,6 +3789,16 @@ function TreeTable({ nodes, allResults, selectedId, onSelect, onDelete, onAddChi
             {isTrunk && node.trunk?.branchName && (
               <span style={{ fontSize: 10, color: '#1565c0', marginLeft: 4, fontWeight: 400 }}>
                 [{node.trunk.branchName}]
+              </span>
+            )}
+            {r && r.feedFrom && r.feedFrom.length > 0 && (
+              <span style={{ fontSize: 9, color: '#e65100', marginLeft: 4 }}>
+                ← {r.feedFrom.map(ff => ff.fromName).join(', ')}
+              </span>
+            )}
+            {r && r.feedTo && r.feedTo.length > 0 && (
+              <span style={{ fontSize: 9, color: '#e65100', marginLeft: 4 }}>
+                → {r.feedTo.map(ft => ft.toName).join(', ')}
               </span>
             )}
           </td>
@@ -3738,6 +3940,93 @@ function TreeTable({ nodes, allResults, selectedId, onSelect, onDelete, onAddChi
 }
 
 /* === PDF GENERATION === */
+
+/* === FEED LINK EDITOR === */
+
+function FeedLinkEditor({ feedLinks, nodes, allResults, groups, onAddFeedLink, onRemoveFeedLink }) {
+  const [fromNodeId, setFromNodeId] = React.useState('');
+  const [toNodeId, setToNodeId] = React.useState('');
+  const [label, setLabel] = React.useState('');
+  const [showForm, setShowForm] = React.useState(false);
+
+  /* 接続元の候補: load ノードと末端 trunk ノード */
+  const fromCandidates = nodes.filter(n => n.type === 'load' || (n.type === 'trunk' && !nodes.some(c => c.parentId === n.id && c.type === 'trunk')));
+  /* 接続先の候補: depth=1 の trunk ノード（1層目幹線） */
+  const toCandidates = nodes.filter(n => n.type === 'trunk' && getDepth(nodes, n.id) === 1);
+
+  const handleAdd = () => {
+    if (!fromNodeId || !toNodeId || fromNodeId === toNodeId) return;
+    /* 同一ツリー内は不可 */
+    const fromAnc = findAncestorTransformer(nodes, fromNodeId);
+    const toAnc = findAncestorTransformer(nodes, toNodeId);
+    if (fromAnc && toAnc && fromAnc.id === toAnc.id) return;
+    onAddFeedLink({ id: genId(), fromNodeId, toNodeId, label: label.trim() });
+    setFromNodeId(''); setToNodeId(''); setLabel(''); setShowForm(false);
+  };
+
+  const getNodeLabel = (n) => {
+    if (n.type === 'load') return (n.load?.loadName || '負荷') + ' [' + (n.load?.trunkName || '') + ']';
+    if (n.type === 'trunk') return n.trunk?.name || '幹線';
+    return n.id;
+  };
+
+  const selStyle = { padding: '3px 6px', borderRadius: 4, border: '1px solid #ccc', fontSize: 12, width: '100%' };
+
+  return (
+    <Sec title="給電接続 (Feed Link)">
+      {feedLinks.length === 0 && !showForm && (
+        <div style={{ fontSize: 12, color: '#999', marginBottom: 8 }}>
+          接続なし — 負荷回路から他グループの幹線へ給電接続を設定できます
+        </div>
+      )}
+      {feedLinks.map(fl => {
+        const fromNode = nodes.find(n => n.id === fl.fromNodeId);
+        const toNode = nodes.find(n => n.id === fl.toNodeId);
+        const fromLabel = fromNode ? getNodeLabel(fromNode) : '(削除済)';
+        const toLabel = toNode ? getNodeLabel(toNode) : '(削除済)';
+        return (
+          <div key={fl.id} style={{ display: 'flex', alignItems: 'center', gap: 6, padding: '4px 0', borderBottom: '1px solid #eee', fontSize: 12 }}>
+            <span style={{ color: '#e65100', fontWeight: 600 }}>→</span>
+            <span style={{ flex: 1 }}>{fromLabel} → {toLabel}{fl.label ? ` (${fl.label})` : ''}</span>
+            <button onClick={() => onRemoveFeedLink(fl.id)}
+              style={{ border: 'none', background: 'none', color: '#f44336', cursor: 'pointer', fontSize: 13, fontWeight: 700 }}>×</button>
+          </div>
+        );
+      })}
+      {showForm ? (
+        <div style={{ padding: 8, background: '#fff3e0', borderRadius: 6, marginTop: 6 }}>
+          <div style={{ marginBottom: 6 }}>
+            <label style={{ fontSize: 11, fontWeight: 600 }}>接続元（負荷/末端幹線）</label>
+            <select value={fromNodeId} onChange={e => setFromNodeId(e.target.value)} style={selStyle}>
+              <option value="">選択...</option>
+              {fromCandidates.map(n => <option key={n.id} value={n.id}>{getNodeLabel(n)}</option>)}
+            </select>
+          </div>
+          <div style={{ marginBottom: 6 }}>
+            <label style={{ fontSize: 11, fontWeight: 600 }}>接続先（1層目幹線）</label>
+            <select value={toNodeId} onChange={e => setToNodeId(e.target.value)} style={selStyle}>
+              <option value="">選択...</option>
+              {toCandidates.map(n => <option key={n.id} value={n.id}>{getNodeLabel(n)}</option>)}
+            </select>
+          </div>
+          <div style={{ marginBottom: 6 }}>
+            <label style={{ fontSize: 11, fontWeight: 600 }}>ラベル（任意）</label>
+            <input type="text" value={label} onChange={e => setLabel(e.target.value)} style={selStyle} placeholder="例: 非常用給電" />
+          </div>
+          <div style={{ display: 'flex', gap: 6 }}>
+            <button onClick={handleAdd}
+              style={{ padding: '4px 12px', borderRadius: 4, border: 'none', background: '#e65100', color: '#fff', cursor: 'pointer', fontSize: 12 }}>追加</button>
+            <button onClick={() => setShowForm(false)}
+              style={{ padding: '4px 12px', borderRadius: 4, border: '1px solid #ccc', background: '#fff', cursor: 'pointer', fontSize: 12 }}>キャンセル</button>
+          </div>
+        </div>
+      ) : (
+        <button onClick={() => setShowForm(true)}
+          style={{ marginTop: 6, padding: '4px 12px', borderRadius: 4, border: '1px solid #e65100', background: '#fff', color: '#e65100', cursor: 'pointer', fontSize: 12 }}>+ 給電接続を追加</button>
+      )}
+    </Sec>
+  );
+}
 
 /* === GROUP EDITOR (M2-6) === */
 
@@ -4090,7 +4379,7 @@ function esc(s) { return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').re
 /**
  * genDiagramHTML — 系統図を印刷用 HTML/SVG として生成
  */
-function genDiagramHTML(nodes, allResults, systemMeta) {
+function genDiagramHTML(nodes, allResults, systemMeta, feedLinks) {
   const direction = (systemMeta && systemMeta.diagramDirection) || 'horizontal';
   /* canvas 座標を確定 */
   const positioned = ensureCanvasPositions(nodes, direction);
@@ -4329,6 +4618,10 @@ function genDiagramHTML(nodes, allResults, systemMeta) {
       if (r) modSvg += `<text x="${x + 8}" y="${y + 46}" font-size="8" fill="#666">MCCB ${r.mccbAT}AT  dI=${rd(r.dI, 1)}A  e=${r.vdPercent}%</text>`;
       /* 電気方式 */
       modSvg += `<text x="${x + 8}" y="${y + 58}" font-size="7" fill="#aaa">${esc(tr.system)} ${tr.voltage}V ${esc(tr.freq)}</text>`;
+      /* feedFrom アノテーション */
+      if (r && r.feedFrom && r.feedFrom.length > 0) {
+        modSvg += `<text x="${x + w - 4}" y="${y + h - 3}" font-size="6" text-anchor="end" fill="#e65100" font-weight="600">← ${esc(r.feedFrom.map(ff => ff.fromName).join(', '))}</text>`;
+      }
 
     } else if (n.type === 'load') {
       const p = n.load || {};
@@ -4357,7 +4650,34 @@ function genDiagramHTML(nodes, allResults, systemMeta) {
       if (r) modSvg += `<text x="${x + 8}" y="${y + 47}" font-size="7" fill="#666">${p.capacity}${esc(p.unit)}  dI=${rd(r.dI, 1)}A  e=${r.vdPercent}%</text>`;
       /* 電気方式 */
       modSvg += `<text x="${x + 8}" y="${y + 58}" font-size="7" fill="#aaa">${esc(p.system)} ${p.voltage}V</text>`;
+      /* feedTo アノテーション */
+      const loadR = allResults[node.id];
+      if (loadR && loadR.feedTo && loadR.feedTo.length > 0) {
+        modSvg += `<text x="${x + w - 4}" y="${y + h - 3}" font-size="6" text-anchor="end" fill="#e65100" font-weight="600">→ ${esc(loadR.feedTo.map(ft => ft.toName).join(', '))}</text>`;
+      }
     }
+  }
+
+  /* feedLink 接続線 */
+  let feedSvg = '';
+  const fLinks = feedLinks || [];
+  for (const fl of fLinks) {
+    const fromNode = positioned.find(n => n.id === fl.fromNodeId);
+    const toNode = positioned.find(n => n.id === fl.toNodeId);
+    if (!fromNode || !toNode || !fromNode.canvas || !toNode.canvas) continue;
+    const fc = fromNode.canvas, tc = toNode.canvas;
+    const fx = isHoriz ? fc.x + fc.width : fc.x + fc.width / 2;
+    const fy = isHoriz ? fc.y + fc.height / 2 : fc.y + fc.height;
+    const tx = isHoriz ? tc.x : tc.x + tc.width / 2;
+    const ty = isHoriz ? tc.y + tc.height / 2 : tc.y;
+    const mx = (fx + tx) / 2;
+    const fromName = fromNode.load?.loadName || fromNode.trunk?.name || '負荷';
+    const toName = toNode.trunk?.name || '幹線';
+    const labelText = fl.label || `${fromName} → ${toName}`;
+    feedSvg += `<path d="M${fx},${fy} C${mx},${fy} ${mx},${ty} ${tx},${ty}" fill="none" stroke="#e65100" stroke-width="1.5" stroke-dasharray="6 3"/>`;
+    feedSvg += `<circle cx="${fx}" cy="${fy}" r="3" fill="#e65100"/>`;
+    feedSvg += `<circle cx="${tx}" cy="${ty}" r="3" fill="#e65100"/>`;
+    feedSvg += `<text x="${mx}" y="${(fy + ty) / 2 - 4}" font-size="7" text-anchor="middle" fill="#e65100" font-weight="600">${esc(labelText)}</text>`;
   }
 
   /* 標題欄 */
@@ -4416,6 +4736,7 @@ svg { width: 100%; height: auto; }
 <body>
 <svg viewBox="${minX} ${minY} ${svgW} ${svgH}" xmlns="http://www.w3.org/2000/svg">
 ${connSvg}
+${feedSvg}
 ${modSvg}
 ${titleSvg}
 ${legendSvg}
@@ -4459,6 +4780,7 @@ function App() {
   /* --- M2-6: グループ管理ステート --- */
   const [groups, setGroups] = React.useState([]);
   const [crossLinks, setCrossLinks] = React.useState([]);
+  const [feedLinks, setFeedLinks] = React.useState([]); /* {id, fromNodeId (load/trunk 4層目), toNodeId (trunk 1層目), label} */
 
   /* --- 計算結果（フォームプレビュー用） --- */
   const result = React.useMemo(() => {
@@ -4469,8 +4791,8 @@ function App() {
   /* --- 全ノード一括計算 --- */
   const allResults = React.useMemo(() => {
     if (nodes.length === 0) return {};
-    return calculateAll(nodes);
-  }, [nodes]);
+    return calculateAll(nodes, feedLinks);
+  }, [nodes, feedLinks]);
 
   /* --- M2: canvas 座標が未設定のノードに自動配置を適用 --- */
   React.useEffect(() => {
@@ -4703,7 +5025,42 @@ function App() {
       setCrossLinks(prev => prev.filter(cl => cl.fromGroupId !== grp.id && cl.toGroupId !== grp.id));
       setGroups(prev => prev.filter(g => g.id !== grp.id));
     }
+    /* feedLinks: 削除ノードに関連する接続を削除 */
+    const deletedIds = new Set([id, ...getDescendants(nodes, id).map(d => d.id)]);
+    setFeedLinks(prev => prev.filter(fl => !deletedIds.has(fl.fromNodeId) && !deletedIds.has(fl.toNodeId)));
     if (selectedId === id) resetToNewLoad();
+  };
+
+  /* --- CRUD: ノード移動（ドラッグ&ドロップ） --- */
+  const handleMoveNode = (dragId, newParentId, insertIndex) => {
+    setNodes(prev => {
+      const dragNode = prev.find(n => n.id === dragId);
+      if (!dragNode) return prev;
+      /* 循環参照チェック: 移動先が自分の子孫でないか */
+      const descendants = getDescendants(prev, dragId);
+      if (descendants.some(d => d.id === newParentId)) return prev;
+
+      let updated = prev.map(n => {
+        if (n.id === dragId) return { ...n, parentId: newParentId };
+        return n;
+      });
+      /* 新しい親の兄弟ノードの order を再計算 */
+      const siblings = getChildren(updated, newParentId);
+      const ordered = siblings.filter(n => n.id !== dragId);
+      ordered.splice(Math.min(insertIndex, ordered.length), 0, updated.find(n => n.id === dragId));
+      const orderMap = {};
+      ordered.forEach((n, i) => { orderMap[n.id] = i; });
+      updated = updated.map(n => orderMap[n.id] != null ? { ...n, order: orderMap[n.id] } : n);
+
+      /* 元の親の兄弟ノードの order も詰め直す */
+      if (dragNode.parentId !== newParentId && dragNode.parentId) {
+        const oldSiblings = getChildren(updated, dragNode.parentId);
+        oldSiblings.forEach((n, i) => {
+          updated = updated.map(u => u.id === n.id ? { ...u, order: i } : u);
+        });
+      }
+      return updated;
+    });
   };
 
   /* --- CRUD: 変圧器登録/更新 --- */
@@ -4748,11 +5105,15 @@ function App() {
     if (parentNode.type === 'transformer') {
       setSelectedId(null);
       setEditMode('trunk');
-      setTrunkParams({ ...DEFAULT_TRUNK_PARAMS, voltage: parentNode.transformer?.secondaryV || 210 });
+      const secV = parentNode.transformer?.secondaryV || 210;
+      setTrunkParams({ ...DEFAULT_TRUNK_PARAMS, voltage: secV, system: secV <= 210 ? '三相3線式' : '三相3線式' });
     } else if (parentNode.type === 'trunk') {
       setSelectedId(null);
       setEditMode('load');
-      setParams({ ...DEFAULT_PARAMS, trunkName: parentNode.trunk?.name || '' });
+      const pV = parentNode.trunk?.voltage || 200;
+      const pSys = parentNode.trunk?.system || '三相3線式';
+      const pFreq = parentNode.trunk?.freq || '60Hz';
+      setParams({ ...DEFAULT_PARAMS, trunkName: parentNode.trunk?.name || '', voltage: pV, system: pSys, freq: pFreq });
       setDisplay({
         capacity: String(DEFAULT_PARAMS.capacity),
         powerFactor: String(DEFAULT_PARAMS.powerFactor),
@@ -4789,7 +5150,7 @@ function App() {
 
   /* --- Export (§14, M2-6: M2G スキーマ) --- */
   const handleExport = () => {
-    const data = { version: 'M2G', nodes, groups, crossLinks, systemMeta, exportedAt: new Date().toISOString() };
+    const data = { version: 'M2G', nodes, groups, crossLinks, feedLinks, systemMeta, exportedAt: new Date().toISOString() };
     const json = JSON.stringify(data, null, 2);
     const blob = new Blob([json], { type: 'application/json' });
     const url = URL.createObjectURL(blob);
@@ -4849,6 +5210,15 @@ function App() {
                 toNodeId: cl.toNodeId ? (idMap[cl.toNodeId] || cl.toNodeId) : null
               }));
               setCrossLinks(prev => [...prev, ...importedLinks]);
+            }
+            /* feedLinks の復元 */
+            if (data.feedLinks && Array.isArray(data.feedLinks)) {
+              const importedFeedLinks = data.feedLinks.map(fl => ({
+                ...fl, id: genId(),
+                fromNodeId: idMap[fl.fromNodeId] || fl.fromNodeId,
+                toNodeId: idMap[fl.toNodeId] || fl.toNodeId
+              }));
+              setFeedLinks(prev => [...prev, ...importedFeedLinks]);
             }
           } else {
             /* M2/P5 形式: ルートノードからグループを自動生成 */
@@ -4928,7 +5298,7 @@ function App() {
       const grp = groups.find(g => g.id === groupId);
       if (grp) filteredNodes = getGroupNodes(nodes, grp.rootNodeId);
     }
-    const html = genDiagramHTML(filteredNodes, allResults, systemMeta);
+    const html = genDiagramHTML(filteredNodes, allResults, systemMeta, feedLinks);
     const w = window.open('', '_blank');
     if (w) { w.document.write(html); w.document.close(); }
     else { alert('ポップアップがブロックされました。ブラウザの設定を確認してください。'); }
@@ -5035,12 +5405,19 @@ function App() {
 
           {/* === グループ管理 (M2-6) === */}
           {editMode === 'group' && (
-            <GroupEditor
-              groups={groups} nodes={nodes} allResults={allResults} crossLinks={crossLinks}
-              onUpdateGroup={handleUpdateGroup} onRemoveGroup={handleRemoveGroup}
-              onAutoGroupAll={handleAutoGroupAll}
-              onAddCrossLink={handleAddCrossLink} onRemoveCrossLink={handleRemoveCrossLink}
-            />
+            <>
+              <GroupEditor
+                groups={groups} nodes={nodes} allResults={allResults} crossLinks={crossLinks}
+                onUpdateGroup={handleUpdateGroup} onRemoveGroup={handleRemoveGroup}
+                onAutoGroupAll={handleAutoGroupAll}
+                onAddCrossLink={handleAddCrossLink} onRemoveCrossLink={handleRemoveCrossLink}
+              />
+              <FeedLinkEditor
+                feedLinks={feedLinks} nodes={nodes} allResults={allResults} groups={groups}
+                onAddFeedLink={(fl) => setFeedLinks(prev => [...prev, fl])}
+                onRemoveFeedLink={(id) => setFeedLinks(prev => prev.filter(fl => fl.id !== id))}
+              />
+            </>
           )}
 
           {/* === 負荷回路フォーム（既存） === */}
@@ -5387,7 +5764,7 @@ function App() {
                 <TreeTable
                   nodes={nodes} allResults={allResults} selectedId={selectedId}
                   onSelect={handleSelectNode} onDelete={handleDeleteNode}
-                  onAddChild={handleAddChild}
+                  onAddChild={handleAddChild} onMoveNode={handleMoveNode}
                   groups={groups} crossLinks={crossLinks}
                   onToggleGroupCollapse={handleToggleGroupCollapse}
                 />
@@ -5402,7 +5779,7 @@ function App() {
                 nodes={nodes} allResults={allResults} systemMeta={systemMeta}
                 selectedId={selectedId} onSelectNode={handleSelectNode}
                 mode={diagramMode} onNodesChange={setNodes}
-                groups={groups} crossLinks={crossLinks}
+                groups={groups} crossLinks={crossLinks} feedLinks={feedLinks}
                 onToggleGroupCollapse={handleToggleGroupCollapse}
               />
             </div>
