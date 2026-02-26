@@ -960,6 +960,37 @@ function calculateAll(nodes) {
     }
   }
 
+  /* 9. 電気方式/電圧の親子不一致チェック */
+  for (const n of nodes) {
+    const r = results[n.id];
+    if (!r) continue;
+    if (!n.parentId) continue;
+    const parent = nodes.find(p => p.id === n.parentId);
+    if (!parent) continue;
+
+    if (n.type === 'load' && parent.type === 'trunk') {
+      if (n.load.system !== parent.trunk.system || n.load.voltage !== parent.trunk.voltage) {
+        r.systemMismatch = true;
+        r.systemMismatchDetail = '子: ' + n.load.system + ' ' + n.load.voltage + 'V \u2260 親: ' + parent.trunk.system + ' ' + parent.trunk.voltage + 'V';
+        r.ok = false;
+      }
+    }
+    if (n.type === 'trunk' && parent.type === 'trunk') {
+      if (n.trunk.system !== parent.trunk.system || n.trunk.voltage !== parent.trunk.voltage) {
+        r.systemMismatch = true;
+        r.systemMismatchDetail = '子: ' + n.trunk.system + ' ' + n.trunk.voltage + 'V \u2260 親: ' + parent.trunk.system + ' ' + parent.trunk.voltage + 'V';
+        r.ok = false;
+      }
+    }
+    if (n.type === 'trunk' && parent.type === 'transformer') {
+      if (n.trunk.voltage !== parent.transformer.secondaryV) {
+        r.systemMismatch = true;
+        r.systemMismatchDetail = '幹線: ' + n.trunk.voltage + 'V \u2260 TR二次: ' + parent.transformer.secondaryV + 'V';
+        r.ok = false;
+      }
+    }
+  }
+
   return results;
 }
 
@@ -1348,26 +1379,41 @@ function DiagramCanvas({ nodes, allResults, systemMeta, selectedId, onSelectNode
   const [panning, setPanning] = React.useState(null);         /* { startX, startY, vtX, vtY } */
   const [wiring, setWiring] = React.useState(null);           /* { fromId, fromPort, mx, my } */
 
-  /* ズーム */
+  /* ホイール操作: 通常=上下スクロール, Shift=左右スクロール, Ctrl=ズーム */
   const handleWheel = React.useCallback((e) => {
     e.preventDefault();
-    const factor = e.deltaY < 0 ? 1.1 : 1 / 1.1;
-    setVt(prev => {
-      const rect = svgRef.current.getBoundingClientRect();
-      const cx = e.clientX - rect.left;
-      const cy = e.clientY - rect.top;
-      const newScale = Math.min(Math.max(prev.scale * factor, 0.1), 5);
-      return {
-        scale: newScale,
-        x: cx - (cx - prev.x) * (newScale / prev.scale),
-        y: cy - (cy - prev.y) * (newScale / prev.scale)
-      };
-    });
+    if (e.ctrlKey || e.metaKey) {
+      /* Ctrl+ホイール: カーソル中心ズーム */
+      const factor = e.deltaY < 0 ? 1.1 : 1 / 1.1;
+      setVt(prev => {
+        const rect = svgRef.current.getBoundingClientRect();
+        const cx = e.clientX - rect.left;
+        const cy = e.clientY - rect.top;
+        const newScale = Math.min(Math.max(prev.scale * factor, 0.1), 5);
+        return {
+          scale: newScale,
+          x: cx - (cx - prev.x) * (newScale / prev.scale),
+          y: cy - (cy - prev.y) * (newScale / prev.scale)
+        };
+      });
+    } else if (e.shiftKey) {
+      /* Shift+ホイール: 左右スクロール */
+      setVt(prev => ({ ...prev, x: prev.x - e.deltaY }));
+    } else {
+      /* 通常ホイール: 上下スクロール */
+      setVt(prev => ({ ...prev, y: prev.y - e.deltaY }));
+    }
   }, []);
 
-  /* パン開始（背景クリック） */
+  /* パン開始（背景クリック / ビューモードでは全域） */
   const handleBgMouseDown = (e) => {
     if (e.button !== 0) return;
+    if (mode !== 'edit') {
+      /* ビューモード: どこでもパン開始 */
+      setPanning({ startX: e.clientX, startY: e.clientY, vtX: vt.x, vtY: vt.y });
+      return;
+    }
+    /* 編集モード: 背景クリックのみパン */
     if (e.target === svgRef.current || e.target.tagName === 'svg') {
       setPanning({ startX: e.clientX, startY: e.clientY, vtX: vt.x, vtY: vt.y });
     }
@@ -1402,6 +1448,15 @@ function DiagramCanvas({ nodes, allResults, systemMeta, selectedId, onSelectNode
       }
     };
     const handleUp = (e) => {
+      /* ビューモード: パン解除 + クリック判定（移動量が小さければノード選択） */
+      if (panning && panning.clickNodeId) {
+        const dx = e.clientX - panning.startX;
+        const dy = e.clientY - panning.startY;
+        if (Math.abs(dx) < 4 && Math.abs(dy) < 4) {
+          const clickedNode = nodes.find(n => n.id === panning.clickNodeId);
+          if (clickedNode) onSelectNode && onSelectNode(clickedNode);
+        }
+      }
       if (wiring && mode === 'edit') {
         /* 接続先ポートの検出 */
         const rect = svgRef.current.getBoundingClientRect();
@@ -1437,9 +1492,14 @@ function DiagramCanvas({ nodes, allResults, systemMeta, selectedId, onSelectNode
     return () => { window.removeEventListener('mousemove', handleMove); window.removeEventListener('mouseup', handleUp); };
   }, [panning, dragging, wiring, vt, nodes, mode, direction]);
 
-  /* ノードドラッグ開始 */
+  /* ノードドラッグ開始 / ビューモードではパン開始 */
   const handleNodeMouseDown = (nodeId, e) => {
-    if (mode !== 'edit') return;
+    if (mode !== 'edit') {
+      /* ビューモード: ノード上でもパン開始（クリック判定は handleUp で） */
+      e.stopPropagation();
+      setPanning({ startX: e.clientX, startY: e.clientY, vtX: vt.x, vtY: vt.y, clickNodeId: nodeId });
+      return;
+    }
     e.stopPropagation();
     const node = nodes.find(n => n.id === nodeId);
     if (!node || !node.canvas) return;
@@ -1645,7 +1705,7 @@ function DiagramCanvas({ nodes, allResults, systemMeta, selectedId, onSelectNode
   return (
     <div style={{ width: '100%', height: '100%', position: 'relative', background: '#f8f9fa', overflow: 'hidden' }}>
       <svg ref={svgRef} width="100%" height="100%"
-        style={{ cursor: panning ? 'grabbing' : 'grab' }}
+        style={{ cursor: panning ? 'grabbing' : (mode === 'edit' ? 'default' : 'grab') }}
         onWheel={handleWheel}
         onMouseDown={handleBgMouseDown}
       >
@@ -1795,6 +1855,329 @@ const DEFAULT_TRUNK_PARAMS = {
   ambientTemp: 40, reductionPreset: '1段 S=d 7列以上', reductionFactor: 0.70,
   powerFactor: 0.85, mccbATOverride: '自動', icuClass: 'standard'
 };
+
+/* --- 一括取込ダイアログ --- */
+
+const BULK_COLUMNS = [
+  { key: 'trunkName',       label: '幹線名',     required: true },
+  { key: 'loadName',        label: '負荷名称',   required: false },
+  { key: 'system',          label: '電気方式',   required: false },
+  { key: 'voltage',         label: '電圧',       required: false },
+  { key: 'capacity',        label: '容量',       required: true },
+  { key: 'unit',            label: '単位',       required: false },
+  { key: 'circuitType',     label: '回路種別',   required: false },
+  { key: 'powerFactor',     label: '力率',       required: false },
+  { key: 'efficiency',      label: '効率',       required: false },
+  { key: 'demandFactor',    label: '需要率',     required: false },
+  { key: 'cableLength',     label: 'こう長',     required: false },
+  { key: 'freq',            label: '周波数',     required: false },
+  { key: 'cableType',       label: 'ケーブル種類', required: false },
+  { key: 'wiringMethod',    label: '配線方式',   required: false },
+  { key: 'ambientTemp',     label: '周囲温度',   required: false },
+  { key: 'reductionFactor', label: '低減率',     required: false },
+  { key: 'mccbATOverride',  label: 'MCCB AT',    required: false },
+  { key: 'trName',          label: '変圧器名',   required: false },
+];
+
+const BULK_HEADER_ROW = BULK_COLUMNS.map(c => c.label).join('\t');
+
+const VALID_SYSTEMS = ['単相2線式', '単相3線式', '三相3線式', '三相4線式'];
+const VALID_UNITS = ['kW', 'kVA', 'A'];
+const VALID_CIRCUIT_TYPES = ['一般', '電動機'];
+const VALID_FREQS = ['50Hz', '60Hz'];
+const VALID_CABLE_TYPES = ['CVT', 'CVD', 'CV-3C', 'CV-2C'];
+const VALID_WIRING_METHODS = ['ケーブルラック配線', '配管配線', '直埋布設', '管路布設'];
+
+function parseBulkRow(cells) {
+  const d = { ...DEFAULT_PARAMS };
+  const errors = [];
+
+  const get = (idx) => (cells[idx] || '').trim();
+
+  /* 幹線名（必須） */
+  const trunkName = get(0);
+  if (!trunkName) errors.push('幹線名が未入力');
+  else d.trunkName = trunkName;
+
+  /* 負荷名称 */
+  if (get(1)) d.loadName = get(1);
+
+  /* 電気方式 */
+  if (get(2)) {
+    if (VALID_SYSTEMS.includes(get(2))) d.system = get(2);
+    else errors.push('電気方式が不正: ' + get(2));
+  }
+
+  /* 電圧 */
+  if (get(3)) {
+    const v = parseFloat(get(3));
+    if (!isNaN(v) && v > 0) d.voltage = v;
+    else errors.push('電圧が不正: ' + get(3));
+  }
+
+  /* 容量（必須） */
+  if (get(4)) {
+    const c = parseFloat(get(4));
+    if (!isNaN(c) && c > 0) d.capacity = c;
+    else errors.push('容量が不正: ' + get(4));
+  } else {
+    errors.push('容量が未入力');
+  }
+
+  /* 単位 */
+  if (get(5)) {
+    if (VALID_UNITS.includes(get(5))) d.unit = get(5);
+    else errors.push('単位が不正: ' + get(5));
+  }
+
+  /* 回路種別 */
+  if (get(6)) {
+    if (VALID_CIRCUIT_TYPES.includes(get(6))) d.circuitType = get(6);
+    else errors.push('回路種別が不正: ' + get(6));
+  }
+
+  /* 力率 */
+  if (get(7)) {
+    const pf = parseFloat(get(7));
+    if (!isNaN(pf) && pf >= 0.1 && pf <= 1.0) d.powerFactor = pf;
+    else errors.push('力率が不正: ' + get(7));
+  }
+
+  /* 効率 */
+  if (get(8)) {
+    const ef = parseFloat(get(8));
+    if (!isNaN(ef) && ef >= 0.1 && ef <= 1.0) d.efficiency = ef;
+    else errors.push('効率が不正: ' + get(8));
+  }
+
+  /* 需要率 */
+  if (get(9)) {
+    const df = parseFloat(get(9));
+    if (!isNaN(df) && df >= 1 && df <= 100) d.demandFactor = df;
+    else errors.push('需要率が不正: ' + get(9));
+  }
+
+  /* こう長 */
+  if (get(10)) {
+    const cl = parseFloat(get(10));
+    if (!isNaN(cl) && cl > 0) d.cableLength = cl;
+    else errors.push('こう長が不正: ' + get(10));
+  }
+
+  /* 周波数 */
+  if (get(11)) {
+    if (VALID_FREQS.includes(get(11))) d.freq = get(11);
+    else errors.push('周波数が不正: ' + get(11));
+  }
+
+  /* ケーブル種類 */
+  if (get(12)) {
+    if (VALID_CABLE_TYPES.includes(get(12))) d.cableType = get(12);
+    else errors.push('ケーブル種類が不正: ' + get(12));
+  }
+
+  /* 配線方式 */
+  if (get(13)) {
+    if (VALID_WIRING_METHODS.includes(get(13))) d.wiringMethod = get(13);
+    else errors.push('配線方式が不正: ' + get(13));
+  }
+
+  /* 周囲温度 */
+  if (get(14)) {
+    const t = parseFloat(get(14));
+    if (!isNaN(t) && t >= 20 && t <= 50) d.ambientTemp = t;
+    else errors.push('周囲温度が不正: ' + get(14));
+  }
+
+  /* 低減率 */
+  if (get(15)) {
+    const rf = parseFloat(get(15));
+    if (!isNaN(rf) && rf >= 0.1 && rf <= 1.0) d.reductionFactor = rf;
+    else errors.push('低減率が不正: ' + get(15));
+  }
+
+  /* MCCB AT */
+  if (get(16)) {
+    if (get(16) === '自動') d.mccbATOverride = '自動';
+    else {
+      const at = parseInt(get(16), 10);
+      if (!isNaN(at) && at > 0) d.mccbATOverride = at;
+      else errors.push('MCCB ATが不正: ' + get(16));
+    }
+  }
+
+  /* 変圧器名 */
+  const trName = get(17) || '';
+
+  return { params: d, errors, trName };
+}
+
+function BulkImportDialog({ open, onClose, onImport }) {
+  const [text, setText] = React.useState('');
+  const [parsed, setParsed] = React.useState(null); /* [{ params, result, errors, rowIndex, trName }] */
+
+  if (!open) return null;
+
+  const handleParse = () => {
+    const lines = text.split('\n').filter(l => l.trim());
+    if (lines.length === 0) { setParsed([]); return; }
+
+    /* ヘッダー行検出: 最初の行が既知ヘッダーと一致するかチェック */
+    let startIdx = 0;
+    const firstCells = lines[0].split('\t');
+    if (firstCells[0].trim() === '幹線名' || firstCells[0].trim() === BULK_COLUMNS[0].label) {
+      startIdx = 1;
+    }
+
+    const rows = [];
+    for (let i = startIdx; i < lines.length; i++) {
+      const cells = lines[i].split('\t');
+      const { params, errors, trName } = parseBulkRow(cells);
+      let result = null;
+      if (errors.length === 0 && params.capacity > 0) {
+        try { result = runCalc(params); } catch (e) { errors.push('計算エラー: ' + e.message); }
+      }
+      rows.push({ params, result, errors, rowIndex: i + 1, trName });
+    }
+    setParsed(rows);
+  };
+
+  const handleCopyHeader = () => {
+    navigator.clipboard.writeText(BULK_HEADER_ROW).then(() => {
+      /* copied */
+    }).catch(() => {
+      /* fallback: select text */
+    });
+  };
+
+  const validRows = parsed ? parsed.filter(r => r.errors.length === 0) : [];
+
+  const overlayStyle = {
+    position: 'fixed', top: 0, left: 0, right: 0, bottom: 0,
+    background: 'rgba(0,0,0,0.5)', zIndex: 10000,
+    display: 'flex', alignItems: 'center', justifyContent: 'center'
+  };
+  const dialogStyle = {
+    background: '#fff', borderRadius: 12, padding: 24,
+    width: '90vw', maxWidth: 1100, maxHeight: '90vh', overflow: 'auto',
+    boxShadow: '0 8px 32px rgba(0,0,0,0.3)'
+  };
+
+  return (
+    <div style={overlayStyle} onClick={onClose}>
+      <div style={dialogStyle} onClick={e => e.stopPropagation()}>
+        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 16 }}>
+          <h3 style={{ margin: 0, fontSize: 18, fontWeight: 700 }}>一括取込</h3>
+          <button onClick={onClose}
+            style={{ border: 'none', background: 'none', fontSize: 24, cursor: 'pointer', color: '#999' }}>&times;</button>
+        </div>
+
+        <div style={{ marginBottom: 8, fontSize: 12, color: '#666' }}>
+          スプレッドシートからタブ区切りデータを貼り付けてください。ヘッダー行は自動検出されます。
+        </div>
+
+        <div style={{ marginBottom: 8 }}>
+          <button onClick={handleCopyHeader}
+            style={{ fontSize: 11, padding: '4px 12px', borderRadius: 4, border: '1px solid #1976d2', background: '#e3f2fd', color: '#1976d2', cursor: 'pointer' }}>
+            ヘッダー行をコピー
+          </button>
+          <span style={{ marginLeft: 8, fontSize: 11, color: '#999' }}>
+            ({BULK_COLUMNS.length}列: {BULK_COLUMNS.slice(0, 5).map(c => c.label).join(', ')}...)
+          </span>
+        </div>
+
+        <textarea
+          value={text}
+          onChange={e => { setText(e.target.value); setParsed(null); }}
+          placeholder={'幹線名\t負荷名称\t電気方式\t電圧\t容量\t...\nP-1\tM1\t三相3線式\t200\t15\t...'}
+          style={{
+            width: '100%', height: 140, fontFamily: 'monospace', fontSize: 12,
+            border: '1px solid #ccc', borderRadius: 6, padding: 8, resize: 'vertical',
+            boxSizing: 'border-box'
+          }}
+        />
+
+        <div style={{ display: 'flex', gap: 8, marginTop: 8, marginBottom: 16 }}>
+          <button onClick={handleParse}
+            style={{ padding: '6px 20px', borderRadius: 6, border: '1px solid #1976d2', background: '#1976d2', color: '#fff', cursor: 'pointer', fontWeight: 700 }}>
+            解析
+          </button>
+          <button onClick={() => { setText(''); setParsed(null); }}
+            style={{ padding: '6px 16px', borderRadius: 6, border: '1px solid #ccc', background: '#fff', cursor: 'pointer' }}>
+            クリア
+          </button>
+        </div>
+
+        {parsed && (
+          <React.Fragment>
+            <div style={{ fontSize: 13, fontWeight: 700, marginBottom: 8 }}>
+              解析結果: {parsed.length}行 (有効: {validRows.length}件{parsed.length - validRows.length > 0 ? ', エラー: ' + (parsed.length - validRows.length) + '件' : ''})
+            </div>
+            <div style={{ maxHeight: 300, overflow: 'auto', border: '1px solid #e0e0e0', borderRadius: 6 }}>
+              <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: 11 }}>
+                <thead>
+                  <tr style={{ background: '#f5f5f5', position: 'sticky', top: 0 }}>
+                    <th style={{ padding: '4px 6px', textAlign: 'left', borderBottom: '1px solid #ccc' }}>#</th>
+                    <th style={{ padding: '4px 6px', textAlign: 'left', borderBottom: '1px solid #ccc' }}>幹線名</th>
+                    <th style={{ padding: '4px 6px', textAlign: 'left', borderBottom: '1px solid #ccc' }}>負荷名</th>
+                    <th style={{ padding: '4px 6px', textAlign: 'left', borderBottom: '1px solid #ccc' }}>方式</th>
+                    <th style={{ padding: '4px 6px', textAlign: 'right', borderBottom: '1px solid #ccc' }}>電圧</th>
+                    <th style={{ padding: '4px 6px', textAlign: 'right', borderBottom: '1px solid #ccc' }}>容量</th>
+                    <th style={{ padding: '4px 6px', textAlign: 'left', borderBottom: '1px solid #ccc' }}>種別</th>
+                    <th style={{ padding: '4px 6px', textAlign: 'right', borderBottom: '1px solid #ccc' }}>力率</th>
+                    <th style={{ padding: '4px 6px', textAlign: 'right', borderBottom: '1px solid #ccc' }}>こう長</th>
+                    <th style={{ padding: '4px 6px', textAlign: 'left', borderBottom: '1px solid #ccc' }}>変圧器</th>
+                    <th style={{ padding: '4px 6px', textAlign: 'left', borderBottom: '1px solid #ccc' }}>判定</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {parsed.map((row, i) => (
+                    <tr key={i} style={{ background: row.errors.length > 0 ? '#ffebee' : (i % 2 === 0 ? '#fff' : '#fafafa') }}>
+                      <td style={{ padding: '3px 6px' }}>{row.rowIndex}</td>
+                      <td style={{ padding: '3px 6px' }}>{row.params.trunkName}</td>
+                      <td style={{ padding: '3px 6px' }}>{row.params.loadName}</td>
+                      <td style={{ padding: '3px 6px' }}>{row.params.system}</td>
+                      <td style={{ padding: '3px 6px', textAlign: 'right' }}>{row.params.voltage}V</td>
+                      <td style={{ padding: '3px 6px', textAlign: 'right' }}>{row.params.capacity}{row.params.unit}</td>
+                      <td style={{ padding: '3px 6px' }}>{row.params.circuitType}</td>
+                      <td style={{ padding: '3px 6px', textAlign: 'right' }}>{row.params.powerFactor}</td>
+                      <td style={{ padding: '3px 6px', textAlign: 'right' }}>{row.params.cableLength}m</td>
+                      <td style={{ padding: '3px 6px' }}>{row.trName || '-'}</td>
+                      <td style={{ padding: '3px 6px' }}>
+                        {row.errors.length > 0
+                          ? <span style={{ color: '#f44336', fontWeight: 700 }} title={row.errors.join('\n')}>{'× ' + row.errors[0]}</span>
+                          : row.result
+                            ? <span style={{ color: row.result.ok ? '#4caf50' : '#ff9800', fontWeight: 700 }}>{row.result.ok ? '○ OK' : '△ 計算NG'}</span>
+                            : <span style={{ color: '#999' }}>-</span>
+                        }
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+
+            <div style={{ display: 'flex', justifyContent: 'flex-end', gap: 8, marginTop: 16 }}>
+              <button onClick={onClose}
+                style={{ padding: '8px 20px', borderRadius: 6, border: '1px solid #ccc', background: '#fff', cursor: 'pointer' }}>
+                キャンセル
+              </button>
+              <button
+                disabled={validRows.length === 0}
+                onClick={() => { onImport(validRows); onClose(); }}
+                style={{
+                  padding: '8px 20px', borderRadius: 6, border: 'none', fontWeight: 700, cursor: validRows.length > 0 ? 'pointer' : 'default',
+                  background: validRows.length > 0 ? '#1976d2' : '#ccc', color: '#fff'
+                }}>
+                取込 ({validRows.length}件)
+              </button>
+            </div>
+          </React.Fragment>
+        )}
+      </div>
+    </div>
+  );
+}
 
 /* --- Badge コンポーネント (§11-1) --- */
 function Badge({ ok, label }) {
@@ -2451,6 +2834,18 @@ function ResultPanel({ result, params }) {
           )}
         </div>
       )}
+
+      {/* 電気方式/電圧 親子不一致警告 */}
+      {r.systemMismatch && (
+        <div style={{ borderTop: '1px solid #f0f0f0', paddingTop: 8, marginTop: 4 }}>
+          <div style={{ display: 'flex', alignItems: 'center', gap: 6, marginBottom: 4 }}>
+            <Badge ok={false} label="方式不一致" />
+          </div>
+          <div style={{ fontSize: 12, color: '#e65100', padding: '4px 8px', background: '#fff3e0', borderRadius: 4 }}>
+            {r.systemMismatchDetail}
+          </div>
+        </div>
+      )}
     </div>
   );
 }
@@ -2855,7 +3250,7 @@ function TreeTable({ nodes, allResults, selectedId, onSelect, onDelete, onAddChi
             {r && r.vd != null ? `${r.vd}V (${r.vdPercent}%)` : '-'}
           </td>
           <td style={{ padding: '6px 4px', fontSize: 12 }}>
-            {r && r.ok != null ? <Badge ok={r.ok} label={r.ok ? 'OK' : 'NG'} /> : '-'}
+            {r && r.ok != null ? <Badge ok={r.ok} label={r.systemMismatch ? '方式NG' : (r.ok ? 'OK' : 'NG')} /> : '-'}
           </td>
           <td style={{ padding: '6px 4px', fontSize: 12, textAlign: 'right' }}>
             {r && r.Isc3 ? `${rd(r.Isc3 / 1000, 1)}kA` : '-'}
@@ -3519,6 +3914,7 @@ function App() {
   });
   const [rightPaneView, setRightPaneView] = React.useState('table'); /* 'table' | 'diagram' | 'split' */
   const [diagramMode, setDiagramMode] = React.useState('edit'); /* 'edit' | 'view' */
+  const [showBulkImport, setShowBulkImport] = React.useState(false);
 
   /* --- M2-6: グループ管理ステート --- */
   const [groups, setGroups] = React.useState([]);
@@ -3650,6 +4046,76 @@ function App() {
       return updated;
     });
     resetToNewLoad();
+  };
+
+  /* --- 一括取込ハンドラ --- */
+  const handleBulkImport = (validRows) => {
+    setNodes(prev => {
+      let updated = [...prev];
+
+      for (const row of validRows) {
+        const p = row.params;
+        const trName = row.trName || '';
+
+        /* 変圧器の解決: trName 指定時は名前でマッチ → なければ自動作成 */
+        let trNode = null;
+        if (trName) {
+          trNode = updated.find(n => n.type === 'transformer' && n.transformer.name === trName);
+          if (!trNode) {
+            trNode = {
+              id: genId(), type: 'transformer', parentId: null,
+              order: updated.filter(n => !n.parentId).length,
+              ts: new Date().toISOString(), externalRef: null,
+              canvas: null,
+              transformer: {
+                ...DEFAULT_TR_PARAMS, name: trName,
+                secondaryV: p.voltage
+              }
+            };
+            updated = addNode(updated, trNode);
+          }
+        } else {
+          /* 変圧器名未指定: 既存の最初の変圧器を使う */
+          trNode = updated.find(n => n.type === 'transformer');
+        }
+
+        /* 幹線の解決: 同一名のトランクを検索 → なければ作成 */
+        let trunk = updated.find(n => n.type === 'trunk' && n.trunk.name === p.trunkName);
+        if (!trunk) {
+          const parentId = trNode ? trNode.id : null;
+          trunk = {
+            id: genId(), type: 'trunk', parentId: parentId,
+            order: getChildren(updated, parentId).length,
+            ts: new Date().toISOString(), externalRef: null,
+            canvas: null,
+            trunk: {
+              ...DEFAULT_TRUNK_PARAMS, name: p.trunkName,
+              system: p.system, voltage: p.voltage,
+              freq: p.freq, supplyType: trNode ? '高圧受電' : p.supplyType
+            }
+          };
+          updated = addNode(updated, trunk);
+        }
+
+        /* 負荷ノード作成 */
+        const loadNode = {
+          id: genId(), type: 'load', parentId: trunk.id,
+          order: getChildren(updated, trunk.id).length,
+          ts: new Date().toISOString(), externalRef: null,
+          canvas: null,
+          load: { ...p }
+        };
+        updated = addNode(updated, loadNode);
+      }
+
+      return updated;
+    });
+    /* 一括取込後にグループを自動生成 */
+    setNodes(prev => {
+      const newGroups = autoCreateGroups(prev, groups);
+      if (newGroups.length > groups.length) setGroups(newGroups);
+      return prev;
+    });
   };
 
   /* --- CRUD: ノード更新 --- */
@@ -3957,6 +4423,10 @@ function App() {
             padding: '4px 12px', borderRadius: 4, border: '1px solid rgba(255,255,255,0.7)',
             background: 'transparent', color: '#fff', cursor: 'pointer', fontSize: 13
           }}>Import</button>
+          <button onClick={() => setShowBulkImport(true)} style={{
+            padding: '4px 12px', borderRadius: 4, border: '1px solid rgba(255,255,255,0.7)',
+            background: 'rgba(255,255,255,0.15)', color: '#fff', cursor: 'pointer', fontSize: 13, fontWeight: 600
+          }}>一括取込</button>
           <button onClick={handleExport} disabled={nodes.length === 0} style={{
             padding: '4px 12px', borderRadius: 4, border: '1px solid rgba(255,255,255,0.7)',
             background: 'transparent', color: '#fff',
@@ -4320,6 +4790,13 @@ function App() {
         </div>
 
       </div>
+
+      {/* 一括取込ダイアログ */}
+      <BulkImportDialog
+        open={showBulkImport}
+        onClose={() => setShowBulkImport(false)}
+        onImport={handleBulkImport}
+      />
     </div>
   );
 }
