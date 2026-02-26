@@ -2611,6 +2611,34 @@ function Badge({ ok, label }) {
   );
 }
 
+/* --- Hint ガイダンスツールチップ (§11-2) --- */
+function Hint({ type, text }) {
+  const [show, setShow] = React.useState(false);
+  const icon = type === 'error' ? '!' : type === 'warn' ? '!' : '?';
+  const bg = type === 'error' ? '#f44336' : type === 'warn' ? '#ff9800' : '#1976d2';
+  return (
+    <span style={{ position: 'relative', display: 'inline-flex', alignItems: 'center' }}
+      onMouseEnter={() => setShow(true)} onMouseLeave={() => setShow(false)}
+      onClick={() => setShow(s => !s)}>
+      <span style={{
+        width: 16, height: 16, borderRadius: '50%', background: bg,
+        color: '#fff', fontSize: 10, fontWeight: 700,
+        display: 'inline-flex', alignItems: 'center', justifyContent: 'center',
+        cursor: 'pointer', flexShrink: 0
+      }}>{icon}</span>
+      {show && (
+        <div style={{
+          position: 'absolute', bottom: '100%', left: '50%', transform: 'translateX(-50%)',
+          marginBottom: 6, padding: '8px 12px', background: 'rgba(33,33,33,0.95)',
+          color: '#fff', fontSize: 12, lineHeight: 1.5, borderRadius: 6,
+          whiteSpace: 'pre-line', minWidth: 240, maxWidth: 360, zIndex: 100,
+          pointerEvents: 'none', boxShadow: '0 2px 8px rgba(0,0,0,0.3)'
+        }}>{text}</div>
+      )}
+    </span>
+  );
+}
+
 /* --- Sec セクションラッパー --- */
 function Sec({ title, children }) {
   return (
@@ -3077,12 +3105,117 @@ function ProfileTab({ nodes, allResults, selectedId, onSelectNode }) {
   );
 }
 
+/* --- getHints ガイダンス生成 (§11-3) --- */
+function getHints(r, params) {
+  const hints = [];
+  const isTrunk = r.hasMotor !== undefined;
+  const isMotor = isTrunk ? r.hasMotor : params.circuitType === '電動機';
+
+  /* NG 系（赤） */
+  if (!r.ampacityOK) hints.push({ id: 'ampNG', section: 'ampacity', type: 'error',
+    text: 'ケーブルの実効許容電流がサイジング電流を下回っています。\n'
+      + '【改善策】ケーブルサイズを上げる / 低減率を改善する（段数・列数の見直し）/ 周囲温度を下げる（換気改善）\n'
+      + '（JCS 0168-2:2016）' });
+  if (!r.vdOK) hints.push({ id: 'vdNG', section: 'vd', type: 'error',
+    text: '電圧降下が許容値を超えています。\n'
+      + '【改善策】ケーブルサイズを上げる / こう長を短くする（ルート変更）/ 電圧を上げる（200V→400V等）\n'
+      + '（内線規程 1310節）' });
+  if (!r.protOK) hints.push({ id: 'protNG', section: 'prot', type: 'error',
+    text: 'MCCB定格に対してケーブルの許容電流が不足しています。'
+      + (isMotor ? ' 電動機回路では実効許容電流 ≧ AT/2.5 が必要です。' : ' 一般回路では実効許容電流 ≧ AT が必要です。') + '\n'
+      + '【改善策】ケーブルサイズを上げる / MCCB ATを下げる（手動指定）\n'
+      + '（電技解釈 第148条）' });
+  if (r.Isc3 != null && r.size) {
+    const wt = checkWithstand(r.size, r.Isc3, 0.1, r.parallel);
+    if (!wt.ok) hints.push({ id: 'wtNG', section: 'fault', type: 'error',
+      text: '短絡電流に対してケーブルの I²t 耐量が不足しています。\n'
+        + '【改善策】ケーブルサイズを上げる / 上流MCCBの遮断時間を短くする\n'
+        + '（JCS 0168-1:2016）' });
+  }
+  if (r.icuOK === false) hints.push({ id: 'icuNG', section: 'fault', type: 'error',
+    text: '想定短絡電流がMCCBの遮断容量を超えています。\n'
+      + '【改善策】高遮断型MCCBに変更する / 上流にリアクトルを検討する\n'
+      + '（JIS C 8201-2-1）' });
+  if (r.elcbCheck && !r.elcbCheck.ok) hints.push({ id: 'elcbNG', section: 'elcb', type: 'error',
+    text: '接触電圧 RA×IΔn が 50V を超えています。\n'
+      + '【改善策】接地抵抗 RA を下げる / ELCB感度電流 IΔn を小さくする\n'
+      + '（JIS C 8201-2-2:2021）' });
+  if (r.systemMismatch) hints.push({ id: 'sysNG', section: 'sys', type: 'error',
+    text: '親幹線と子回路で電気方式または電圧が異なります。\n意図的でなければ、子回路の設定を親に合わせてください。' });
+
+  /* 注意系（黄） */
+  if (r.vdOK && r.allowVdPercent > 0 && r.vdPercent >= r.allowVdPercent * 0.8) hints.push({ id: 'vdTight', section: 'vd', type: 'warn',
+    text: '電圧降下率が許容値の' + Math.round(r.vdPercent / r.allowVdPercent * 100) + '%に達しています。'
+      + '\n将来の負荷増設や力率の変動を考慮すると、1段上のケーブルサイズも検討してください。\n'
+      + '（内線規程 1310節）' });
+  if (r.protOK && r.effectiveAmpacity > 0) {
+    const protThresh = isMotor ? r.mccbAT / 2.5 : r.mccbAT;
+    if (protThresh > 0) {
+      const margin = r.effectiveAmpacity / protThresh;
+      if (margin >= 1 && margin < 1.15) hints.push({ id: 'protTight', section: 'prot', type: 'warn',
+        text: '保護協調の余裕が' + Math.round((margin - 1) * 100) + '%と小さいです。'
+          + '\n温度条件の変化や経年劣化を考慮すると、マージンの確保が望ましいです。\n'
+          + '（電技解釈 第148条）' });
+    }
+  }
+  if (r.parallel > 1) hints.push({ id: 'para', section: 'summary', type: 'warn',
+    text: '単一ケーブルでは条件を満たせないため、325mm²×2並列が選定されました。\n'
+      + '施工コスト・スペースを考慮し、電圧の格上げ（200V→400V等）も検討してください。' });
+  if (r.cumulativeVdP != null && r.allowVdPercent > 0 && r.cumulativeVdP >= r.allowVdPercent * 0.7) hints.push({ id: 'cumVd', section: 'cumVd', type: 'warn',
+    text: '変圧器からの累積電圧降下が大きくなっています。\n末端の機器で電圧不足が生じる可能性があります。' });
+
+  /* 情報系（青） */
+  if (isMotor && !isTrunk) hints.push({ id: 'motorInfo', section: 'summary', type: 'info',
+    text: '電動機回路では始動電流を考慮し、サイジング電流に' + (r.dI <= 50 ? '×1.25' : '×1.1') + 'の補正を行います。'
+      + '\n保護協調も AT/2.5 で判定します（始動時の不要遮断を防止）。\n'
+      + '（内線規程 3705-6）' });
+  if (isTrunk && r.hasMotor) hints.push({ id: 'trMotor', section: 'summary', type: 'info',
+    text: '電動機が含まれる幹線では、電動機分の合計に' + (r.sumIM <= 50 ? '×1.25' : '×1.1') + 'を乗じてから一般分を加算します。\n'
+      + 'これは複数電動機の同時始動を想定した安全側の設計です。\n'
+      + '（内線規程 3705-6）' });
+  if (r.tempFactor != null && rd(r.tempFactor, 3) !== 1) hints.push({ id: 'tempInfo', section: 'ampacity', type: 'info',
+    text: '周囲温度による補正係数 ' + r.tempFactor + ' が適用されています。'
+      + '\n基底温度（気中:40℃ / 地中:25℃）と異なる環境では許容電流が変化します。\n'
+      + '（内線規程 JEAC 8001）' });
+  if (r.reductionFactor < 1.0) hints.push({ id: 'redInfo', section: 'ampacity', type: 'info',
+    text: '多条布設による相互加熱のため、許容電流が' + Math.round((1 - r.reductionFactor) * 100) + '%低減されています。'
+      + '\n段数・列数を変更すると低減率が変わります。\n'
+      + '（内線規程 JEAC 8001）' });
+  if (r.branchBreaker) {
+    if (!r.branchBreaker.required) hints.push({ id: 'bbOmit', section: 'bb', type: 'info',
+      text: '電技解釈第148条4号の条件' + r.branchBreaker.rule.replace(/（.*）/, '') + 'を満たすため、分岐ブレーカーを省略できます。'
+        + '\nただし省略は義務ではなく、保守性を考慮して設置する選択もあります。\n'
+        + '（電技解釈 第148条4号）' });
+    else hints.push({ id: 'bbReq', section: 'bb', type: 'info',
+      text: '省略条件（イ・ロ・ハ）のいずれも満たさないため、分岐点にブレーカーの設置が必要です。\n'
+        + '（電技解釈 第148条4号）' });
+  }
+
+  return hints;
+}
+
+/* --- getTransformerHints 変圧器ガイダンス (§11-4) --- */
+function getTransformerHints(r, utilization) {
+  const hints = [];
+  if (utilization >= 80) hints.push({ id: 'trHigh', section: 'util', type: 'warn',
+    text: '変圧器の利用率が' + Math.round(utilization) + '%です。\n将来の負荷増設余地が限られます。増設予定がある場合は上位容量を検討してください。' });
+  if (utilization > 0 && utilization <= 30) hints.push({ id: 'trLow', section: 'util', type: 'warn',
+    text: '変圧器の利用率が' + Math.round(utilization) + '%と低く、設備投資効率の面で過剰な可能性があります。' });
+  if (r.groundFault) hints.push({ id: 'igInfo', section: 'ground', type: 'info',
+    text: 'B種接地抵抗の上限は一線地絡電流 Ig とVCB遮断時間で決まります。\n'
+      + '0.5秒以内: Rb ≤ 150/Ig、1.0秒以内: Rb ≤ 600/Ig\n'
+      + '（電技解釈 第17条）' });
+  return hints;
+}
+
 /* --- ResultPanel 選定結果パネル (§11) --- */
 function ResultPanel({ result, params }) {
   if (!result) return <div style={{ color: '#999', padding: 16 }}>入力を完了すると結果が表示されます</div>;
   const r = result;
   const isTrunk = r.hasMotor !== undefined;
   const isMotor = isTrunk ? r.hasMotor : params.circuitType === '電動機';
+  const hints = getHints(r, params);
+  const hFor = (sec) => hints.filter(h => h.section === sec).map(h => <Hint key={h.id} type={h.type} text={h.text} />);
 
   const panelStyle = {
     background: '#fff', border: '1px solid #e0e0e0', borderRadius: 8,
@@ -3105,6 +3238,7 @@ function ResultPanel({ result, params }) {
             color: r.ok ? '#4caf50' : '#f44336'
           }}>{r.ok ? 'OK' : 'NG'}</span>
           <span style={{ fontSize: 10, color: '#888', textAlign: 'center' }}>総合判定</span>
+          {hFor('summary')}
         </div>
         <div style={{ display: 'flex', gap: 16, flex: 1 }}>
           <div style={cellStyle}>
@@ -3137,6 +3271,7 @@ function ResultPanel({ result, params }) {
         <div style={cellStyle}>
           <div style={{ display: 'flex', alignItems: 'center', gap: 6, marginBottom: 4 }}>
             <Badge ok={r.ampacityOK} label="許容電流" />
+            {hFor('ampacity')}
           </div>
           <div style={detailRow}><span>基本許容電流</span><span>{r.baseAmpacity} A</span></div>
           <div style={detailRow}><span>温度補正</span><span>{r.tempFactor}</span></div>
@@ -3149,6 +3284,7 @@ function ResultPanel({ result, params }) {
         <div style={cellStyle}>
           <div style={{ display: 'flex', alignItems: 'center', gap: 6, marginBottom: 4 }}>
             <Badge ok={r.vdOK} label="電圧降下" />
+            {hFor('vd')}
           </div>
           <div style={detailRow}><span>Z</span><span>{r.Z} Ω/km</span></div>
           <div style={detailRow}><span>方式係数 K</span><span>{rd(r.K, 4)}</span></div>
@@ -3164,6 +3300,7 @@ function ResultPanel({ result, params }) {
         <div style={cellStyle}>
           <div style={{ display: 'flex', alignItems: 'center', gap: 6, marginBottom: 4 }}>
             <Badge ok={r.protOK} label="保護協調" />
+            {hFor('prot')}
           </div>
           <div style={detailRow}><span>MCCB 定格</span><span>{r.mccbAT} AT</span></div>
           {isMotor && (
@@ -3179,7 +3316,7 @@ function ResultPanel({ result, params }) {
         <div style={cellStyle}>
           {r.cumulativeVd != null && r.cumulativeVd > 0 ? (
             <React.Fragment>
-              <div style={{ fontSize: 13, fontWeight: 700, color: '#1976d2', marginBottom: 4 }}>累積電圧降下</div>
+              <div style={{ display: 'flex', alignItems: 'center', gap: 6, fontSize: 13, fontWeight: 700, color: '#1976d2', marginBottom: 4 }}>累積電圧降下{hFor('cumVd')}</div>
               <div style={{ ...detailRow, fontWeight: 700 }}>
                 <span>変圧器からの累積</span>
                 <span>{r.cumulativeVd} V ({r.cumulativeVdP}%)</span>
@@ -3197,7 +3334,7 @@ function ResultPanel({ result, params }) {
       {/* 短絡電流（変圧器接続時） */}
       {r.Isc3 != null && (
         <div style={{ borderTop: '1px solid #f0f0f0', paddingTop: 8, marginTop: 4 }}>
-          <div style={sectionTitle}>短絡電流</div>
+          <div style={{ ...sectionTitle, display: 'flex', alignItems: 'center', gap: 6 }}>短絡電流{hFor('fault')}</div>
           <div style={{ display: 'flex', gap: 12 }}>
             <div style={cellStyle}>
               <div style={detailRow}><span>Isc₃</span><span>{rd(r.Isc3 / 1000, 1)} kA</span></div>
@@ -3231,7 +3368,7 @@ function ResultPanel({ result, params }) {
       {/* 地絡保護（ELCB 設定回路のみ） */}
       {r.elcbCheck && (
         <div style={{ borderTop: '1px solid #f0f0f0', paddingTop: 8, marginTop: 4 }}>
-          <div style={sectionTitle}>地絡保護</div>
+          <div style={{ ...sectionTitle, display: 'flex', alignItems: 'center', gap: 6 }}>地絡保護{hFor('elcb')}</div>
           <div style={detailRow}>
             <span>ELCB 感度 IΔn</span>
             <span>{r.elcbCheck.IΔn_mA} mA</span>
@@ -3257,7 +3394,7 @@ function ResultPanel({ result, params }) {
       {/* 分岐ブレーカー省略条件 (電技解釈148条4号) */}
       {r.branchBreaker && (
         <div style={{ borderTop: '1px solid #f0f0f0', paddingTop: 8, marginTop: 4 }}>
-          <div style={sectionTitle}>分岐ブレーカー</div>
+          <div style={{ ...sectionTitle, display: 'flex', alignItems: 'center', gap: 6 }}>分岐ブレーカー{hFor('bb')}</div>
           <div style={detailRow}>
             <span>判定</span>
             <span style={{ fontWeight: 700, color: r.branchBreaker.required ? '#e65100' : '#4caf50' }}>
@@ -3282,6 +3419,7 @@ function ResultPanel({ result, params }) {
         <div style={{ borderTop: '1px solid #f0f0f0', paddingTop: 8, marginTop: 4 }}>
           <div style={{ display: 'flex', alignItems: 'center', gap: 6, marginBottom: 4 }}>
             <Badge ok={false} label="方式不一致" />
+            {hFor('sys')}
           </div>
           <div style={{ fontSize: 12, color: '#e65100', padding: '4px 8px', background: '#fff3e0', borderRadius: 4 }}>
             {r.systemMismatchDetail}
@@ -3310,6 +3448,8 @@ function TransformerResultPanel({ result, nodes, nodeId, allResults }) {
     }
     utilization = r.capacity_kVA > 0 ? totalKW / r.capacity_kVA * 100 : 0;
   }
+  const trHints = getTransformerHints(r, utilization);
+  const hFor = (sec) => trHints.filter(h => h.section === sec).map(h => <Hint key={h.id} type={h.type} text={h.text} />);
 
   return (
     <div>
@@ -3324,7 +3464,10 @@ function TransformerResultPanel({ result, nodes, nodeId, allResults }) {
             <div style={ddStyle}>{rd(r.Isc3 / 1000, 1)} kA</div>
           </div>
           <div style={{ flex: 1 }}>
-            <div style={dtStyle}>利用率</div>
+            <div style={{ display: 'flex', alignItems: 'center', gap: 4 }}>
+              <div style={dtStyle}>利用率</div>
+              {hFor('util')}
+            </div>
             <div style={ddStyle}>{rd(utilization)}%</div>
           </div>
         </div>
@@ -3337,7 +3480,7 @@ function TransformerResultPanel({ result, nodes, nodeId, allResults }) {
       </div>
       {r.groundFault && (
         <div style={cardStyle}>
-          <div style={{ fontSize: 13, fontWeight: 700, marginBottom: 8, color: '#1976d2' }}>接地設計</div>
+          <div style={{ fontSize: 13, fontWeight: 700, marginBottom: 8, color: '#1976d2', display: 'flex', alignItems: 'center', gap: 6 }}>接地設計{hFor('ground')}</div>
           <div style={detailRow}><span>一線地絡電流 Ig</span><span>{r.groundFault.Ig} A</span></div>
           <div style={detailRow}>
             <span>B種接地抵抗上限</span>
