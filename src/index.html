@@ -4453,6 +4453,7 @@ function App() {
   });
   const [rightPaneView, setRightPaneView] = React.useState('table'); /* 'table' | 'diagram' | 'split' */
   const [diagramMode, setDiagramMode] = React.useState('edit'); /* 'edit' | 'view' */
+  const [resultCollapsed, setResultCollapsed] = React.useState(false); /* 結果パネル折りたたみ */
   const [showBulkImport, setShowBulkImport] = React.useState(false);
 
   /* --- M2-6: グループ管理ステート --- */
@@ -5270,19 +5271,109 @@ function App() {
               flex: rightPaneView === 'split' ? '0 0 40%' : 1,
               overflowY: 'auto', padding: 16
             }}>
-              {/* 結果パネル（モード別） */}
-              {editMode === 'transformer' && (
-                <TransformerResultPanel
-                  result={isEditing ? selectedResult : trPreview}
-                  nodes={nodes} nodeId={selectedId} allResults={allResults}
-                />
-              )}
-              {editMode === 'trunk' && selectedResult && (
-                <ResultPanel result={selectedResult} params={selectedNode?.trunk || trunkParams} />
-              )}
-              {editMode === 'load' && (
-                <ResultPanel result={isEditing ? selectedResult : result} params={params} />
-              )}
+              {/* 結果パネル（折りたたみ可能） */}
+              {(() => {
+                const activeResult = editMode === 'transformer'
+                  ? (isEditing ? selectedResult : trPreview)
+                  : editMode === 'trunk'
+                    ? selectedResult
+                    : editMode === 'load'
+                      ? (isEditing ? selectedResult : result)
+                      : null;
+                const hasResult = activeResult != null;
+
+                if (!hasResult) return null;
+
+                return (
+                  <div style={{ marginBottom: 8 }}>
+                    {/* 折りたたみヘッダー */}
+                    <div
+                      onClick={() => setResultCollapsed(prev => !prev)}
+                      style={{
+                        display: 'flex', alignItems: 'center', gap: 8, cursor: 'pointer',
+                        padding: '6px 0', userSelect: 'none'
+                      }}
+                    >
+                      <span style={{ fontSize: 11, color: '#999', width: 14, textAlign: 'center' }}>
+                        {resultCollapsed ? '▶' : '▼'}
+                      </span>
+                      <span style={{ fontSize: 13, fontWeight: 700, color: '#555' }}>選定結果</span>
+                      {/* 折りたたみ時: OK/NG サマリーバッジ */}
+                      {resultCollapsed && editMode !== 'transformer' && activeResult && (
+                        <div style={{ display: 'flex', gap: 6, marginLeft: 8, flexWrap: 'wrap' }}>
+                          <span style={{
+                            padding: '1px 8px', borderRadius: 3, fontSize: 11, fontWeight: 700,
+                            color: '#fff', background: activeResult.ok ? '#4caf50' : '#f44336'
+                          }}>{activeResult.ok ? 'OK' : 'NG'}</span>
+                          {activeResult.ampacityOK != null && (
+                            <span style={{
+                              padding: '1px 6px', borderRadius: 3, fontSize: 10, fontWeight: 600,
+                              color: '#fff', background: activeResult.ampacityOK ? '#4caf50' : '#f44336'
+                            }}>許容電流</span>
+                          )}
+                          {activeResult.vdOK != null && (
+                            <span style={{
+                              padding: '1px 6px', borderRadius: 3, fontSize: 10, fontWeight: 600,
+                              color: '#fff', background: activeResult.vdOK ? '#4caf50' : '#f44336'
+                            }}>電圧降下</span>
+                          )}
+                          {activeResult.protOK != null && (
+                            <span style={{
+                              padding: '1px 6px', borderRadius: 3, fontSize: 10, fontWeight: 600,
+                              color: '#fff', background: activeResult.protOK ? '#4caf50' : '#f44336'
+                            }}>保護協調</span>
+                          )}
+                          {activeResult.Isc3 != null && activeResult.size && (() => {
+                            const wt = checkWithstand(activeResult.size, activeResult.Isc3, 0.1, activeResult.parallel);
+                            return (
+                              <span style={{
+                                padding: '1px 6px', borderRadius: 3, fontSize: 10, fontWeight: 600,
+                                color: '#fff', background: wt.ok ? '#4caf50' : '#f44336'
+                              }}>熱耐量</span>
+                            );
+                          })()}
+                          {activeResult.icuOK != null && (
+                            <span style={{
+                              padding: '1px 6px', borderRadius: 3, fontSize: 10, fontWeight: 600,
+                              color: '#fff', background: activeResult.icuOK ? '#4caf50' : '#f44336'
+                            }}>遮断容量</span>
+                          )}
+                          {activeResult.elcbCheck && activeResult.elcbCheck.ok != null && (
+                            <span style={{
+                              padding: '1px 6px', borderRadius: 3, fontSize: 10, fontWeight: 600,
+                              color: '#fff', background: activeResult.elcbCheck.ok ? '#4caf50' : '#f44336'
+                            }}>地絡保護</span>
+                          )}
+                        </div>
+                      )}
+                      {/* 折りたたみ時: トランス概要 */}
+                      {resultCollapsed && editMode === 'transformer' && activeResult && (
+                        <div style={{ display: 'flex', gap: 10, marginLeft: 8, fontSize: 11, color: '#666' }}>
+                          <span>In={rd(activeResult.In)}A</span>
+                          <span>Isc₃={rd(activeResult.Isc3 / 1000, 1)}kA</span>
+                        </div>
+                      )}
+                    </div>
+                    {/* 展開時: 既存の結果パネル */}
+                    {!resultCollapsed && (
+                      <div>
+                        {editMode === 'transformer' && (
+                          <TransformerResultPanel
+                            result={activeResult}
+                            nodes={nodes} nodeId={selectedId} allResults={allResults}
+                          />
+                        )}
+                        {editMode === 'trunk' && selectedResult && (
+                          <ResultPanel result={selectedResult} params={selectedNode?.trunk || trunkParams} />
+                        )}
+                        {editMode === 'load' && (
+                          <ResultPanel result={activeResult} params={params} />
+                        )}
+                      </div>
+                    )}
+                  </div>
+                );
+              })()}
 
               {/* 登録一覧テーブル */}
               <div style={{
