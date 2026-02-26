@@ -1,7 +1,14 @@
 {
-  "version": "P4",
+  "version": "M2G",
   "exportedAt": "2026-02-25T00:00:00.000Z",
   "description": "複雑なテスト用インポートデータ — 工場+事務所棟の複合施設を想定",
+  "systemMeta": {
+    "projectName": "テスト複合施設",
+    "hvVoltage": 6600,
+    "freq": "60Hz",
+    "substationName": "受電設備",
+    "diagramDirection": "horizontal"
+  },
   "nodes": [
     {
       "id": "tr-01",
@@ -10,6 +17,7 @@
       "order": 0,
       "ts": "2026-02-25T00:00:00.000Z",
       "externalRef": null,
+      "canvas": null,
       "transformer": {
         "name": "TR-1 工場動力",
         "trType": "三相油入",
@@ -24,7 +32,8 @@
           "cableType": "CVT",
           "cableSize_mm2": 60,
           "totalCableLength_km": 0.15,
-          "capacitance_uF_per_km": null
+          "capacitance_uF_per_km": null,
+          "vcbTripTime_s": 1.0
         }
       }
     },
@@ -35,6 +44,7 @@
       "order": 1,
       "ts": "2026-02-25T00:00:01.000Z",
       "externalRef": null,
+      "canvas": null,
       "transformer": {
         "name": "TR-2 事務所電灯",
         "trType": "モールド",
@@ -49,7 +59,8 @@
           "cableType": "CV-3C",
           "cableSize_mm2": 38,
           "totalCableLength_km": 0.08,
-          "capacitance_uF_per_km": null
+          "capacitance_uF_per_km": null,
+          "vcbTripTime_s": 1.0
         }
       }
     },
@@ -60,6 +71,7 @@
       "order": 2,
       "ts": "2026-02-25T00:00:02.000Z",
       "externalRef": null,
+      "canvas": null,
       "transformer": {
         "name": "TR-3 単相特殊",
         "trType": "単相油入",
@@ -74,7 +86,8 @@
           "cableType": null,
           "cableSize_mm2": null,
           "totalCableLength_km": null,
-          "capacitance_uF_per_km": null
+          "capacitance_uF_per_km": null,
+          "vcbTripTime_s": 1.0
         }
       }
     },
@@ -86,8 +99,10 @@
       "order": 0,
       "ts": "2026-02-25T00:01:00.000Z",
       "externalRef": null,
+      "canvas": null,
       "trunk": {
         "name": "P-1 工場主幹",
+        "branchName": "",
         "system": "三相3線式",
         "voltage": 210,
         "freq": "60Hz",
@@ -99,7 +114,8 @@
         "reductionPreset": "2段 S=d 3列",
         "reductionFactor": 0.60,
         "powerFactor": 0.80,
-        "mccbATOverride": "自動"
+        "mccbATOverride": "自動",
+        "icuClass": "standard"
       }
     },
     {
@@ -109,8 +125,10 @@
       "order": 0,
       "ts": "2026-02-25T00:01:01.000Z",
       "externalRef": null,
+      "canvas": null,
       "trunk": {
         "name": "P-1A 加工ライン",
+        "branchName": "",
         "system": "三相3線式",
         "voltage": 210,
         "freq": "60Hz",
@@ -122,7 +140,8 @@
         "reductionPreset": "1段 S=d 3列",
         "reductionFactor": 0.80,
         "powerFactor": 0.82,
-        "mccbATOverride": "自動"
+        "mccbATOverride": "自動",
+        "icuClass": "standard"
       }
     },
     {
@@ -132,8 +151,10 @@
       "order": 1,
       "ts": "2026-02-25T00:01:02.000Z",
       "externalRef": null,
+      "canvas": null,
       "trunk": {
         "name": "P-1B 組立ライン",
+        "branchName": "",
         "system": "三相3線式",
         "voltage": 210,
         "freq": "60Hz",
@@ -145,7 +166,8 @@
         "reductionPreset": "補正なし",
         "reductionFactor": 1.00,
         "powerFactor": 0.85,
-        "mccbATOverride": 400
+        "mccbATOverride": 400,
+        "icuClass": "standard"
       }
     },
     {
@@ -155,8 +177,10 @@
       "order": 1,
       "ts": "2026-02-25T00:01:03.000Z",
       "externalRef": null,
+      "canvas": null,
       "trunk": {
         "name": "P-2 高圧動力",
+        "branchName": "",
         "system": "三相3線式",
         "voltage": 440,
         "freq": "60Hz",
@@ -168,7 +192,8 @@
         "reductionPreset": "1段 S=d 2列",
         "reductionFactor": 0.85,
         "powerFactor": 0.88,
-        "mccbATOverride": "自動"
+        "mccbATOverride": "自動",
+        "icuClass": "standard"
       }
     },
 
@@ -179,8 +204,10 @@
       "order": 0,
       "ts": "2026-02-25T00:02:00.000Z",
       "externalRef": null,
+      "canvas": null,
       "trunk": {
         "name": "L-1 事務所主幹",
+        "branchName": "",
         "system": "単相3線式",
         "voltage": 200,
         "freq": "60Hz",
@@ -192,7 +219,8 @@
         "reductionPreset": "1段 S=d 7列以上",
         "reductionFactor": 0.70,
         "powerFactor": 0.90,
-        "mccbATOverride": "自動"
+        "mccbATOverride": "自動",
+        "icuClass": "standard"
       }
     },
     {
@@ -202,8 +230,10 @@
       "order": 0,
       "ts": "2026-02-25T00:02:01.000Z",
       "externalRef": null,
+      "canvas": null,
       "trunk": {
         "name": "L-1A 1F事務室",
+        "branchName": "",
         "system": "単相3線式",
         "voltage": 200,
         "freq": "60Hz",
@@ -215,7 +245,8 @@
         "reductionPreset": "補正なし",
         "reductionFactor": 1.00,
         "powerFactor": 0.95,
-        "mccbATOverride": "自動"
+        "mccbATOverride": "自動",
+        "icuClass": "standard"
       }
     },
     {
@@ -225,8 +256,10 @@
       "order": 1,
       "ts": "2026-02-25T00:02:02.000Z",
       "externalRef": null,
+      "canvas": null,
       "trunk": {
         "name": "L-1B 2Fサーバー室",
+        "branchName": "",
         "system": "三相3線式",
         "voltage": 200,
         "freq": "60Hz",
@@ -238,7 +271,8 @@
         "reductionPreset": "1段 S=d 2列",
         "reductionFactor": 0.85,
         "powerFactor": 0.92,
-        "mccbATOverride": "自動"
+        "mccbATOverride": "自動",
+        "icuClass": "standard"
       }
     },
 
@@ -249,8 +283,10 @@
       "order": 0,
       "ts": "2026-02-25T00:03:00.000Z",
       "externalRef": null,
+      "canvas": null,
       "trunk": {
         "name": "S-1 単相主幹",
+        "branchName": "",
         "system": "単相2線式",
         "voltage": 200,
         "freq": "50Hz",
@@ -262,7 +298,8 @@
         "reductionPreset": "補正なし",
         "reductionFactor": 1.00,
         "powerFactor": 0.90,
-        "mccbATOverride": "自動"
+        "mccbATOverride": "自動",
+        "icuClass": "standard"
       }
     },
 
@@ -273,6 +310,7 @@
       "order": 0,
       "ts": "2026-02-25T00:10:00.000Z",
       "externalRef": null,
+      "canvas": null,
       "load": {
         "trunkName": "P-1A 加工ライン",
         "loadName": "CNC旋盤 M1",
@@ -292,7 +330,12 @@
         "wiringMethod": "ケーブルラック配線",
         "ambientTemp": 45,
         "reductionPreset": "1段 S=d 3列",
-        "reductionFactor": 0.80
+        "reductionFactor": 0.80,
+        "icuClass": "standard",
+        "hasELCB": false,
+        "elcbSensitivity_mA": 30,
+        "groundingMethod": "TT",
+        "groundResistance_ohm": 100
       }
     },
     {
@@ -302,6 +345,7 @@
       "order": 1,
       "ts": "2026-02-25T00:10:01.000Z",
       "externalRef": null,
+      "canvas": null,
       "load": {
         "trunkName": "P-1A 加工ライン",
         "loadName": "マシニングセンタ M2",
@@ -321,7 +365,12 @@
         "wiringMethod": "ケーブルラック配線",
         "ambientTemp": 45,
         "reductionPreset": "1段 S=d 3列",
-        "reductionFactor": 0.80
+        "reductionFactor": 0.80,
+        "icuClass": "standard",
+        "hasELCB": false,
+        "elcbSensitivity_mA": 30,
+        "groundingMethod": "TT",
+        "groundResistance_ohm": 100
       }
     },
     {
@@ -331,6 +380,7 @@
       "order": 2,
       "ts": "2026-02-25T00:10:02.000Z",
       "externalRef": null,
+      "canvas": null,
       "load": {
         "trunkName": "P-1A 加工ライン",
         "loadName": "研削盤 M3",
@@ -350,7 +400,12 @@
         "wiringMethod": "配管配線",
         "ambientTemp": 45,
         "reductionPreset": "補正なし",
-        "reductionFactor": 1.00
+        "reductionFactor": 1.00,
+        "icuClass": "standard",
+        "hasELCB": false,
+        "elcbSensitivity_mA": 30,
+        "groundingMethod": "TT",
+        "groundResistance_ohm": 100
       }
     },
     {
@@ -360,6 +415,7 @@
       "order": 3,
       "ts": "2026-02-25T00:10:03.000Z",
       "externalRef": null,
+      "canvas": null,
       "load": {
         "trunkName": "P-1A 加工ライン",
         "loadName": "加工ライン制御盤",
@@ -379,7 +435,12 @@
         "wiringMethod": "ケーブルラック配線",
         "ambientTemp": 45,
         "reductionPreset": "1段 S=d 7列以上",
-        "reductionFactor": 0.70
+        "reductionFactor": 0.70,
+        "icuClass": "standard",
+        "hasELCB": false,
+        "elcbSensitivity_mA": 30,
+        "groundingMethod": "TT",
+        "groundResistance_ohm": 100
       }
     },
     {
@@ -389,6 +450,7 @@
       "order": 4,
       "ts": "2026-02-25T00:10:04.000Z",
       "externalRef": null,
+      "canvas": null,
       "load": {
         "trunkName": "P-1A 加工ライン",
         "loadName": "集塵機 M4",
@@ -408,7 +470,12 @@
         "wiringMethod": "ケーブルラック配線",
         "ambientTemp": 45,
         "reductionPreset": "2段 S=d 2列",
-        "reductionFactor": 0.70
+        "reductionFactor": 0.70,
+        "icuClass": "standard",
+        "hasELCB": false,
+        "elcbSensitivity_mA": 30,
+        "groundingMethod": "TT",
+        "groundResistance_ohm": 100
       }
     },
 
@@ -419,6 +486,7 @@
       "order": 0,
       "ts": "2026-02-25T00:11:00.000Z",
       "externalRef": null,
+      "canvas": null,
       "load": {
         "trunkName": "P-1B 組立ライン",
         "loadName": "ロボットアーム M5",
@@ -438,7 +506,12 @@
         "wiringMethod": "配管配線",
         "ambientTemp": 40,
         "reductionPreset": "補正なし",
-        "reductionFactor": 1.00
+        "reductionFactor": 1.00,
+        "icuClass": "standard",
+        "hasELCB": false,
+        "elcbSensitivity_mA": 30,
+        "groundingMethod": "TT",
+        "groundResistance_ohm": 100
       }
     },
     {
@@ -448,6 +521,7 @@
       "order": 1,
       "ts": "2026-02-25T00:11:01.000Z",
       "externalRef": null,
+      "canvas": null,
       "load": {
         "trunkName": "P-1B 組立ライン",
         "loadName": "コンベア M6",
@@ -467,7 +541,12 @@
         "wiringMethod": "配管配線",
         "ambientTemp": 40,
         "reductionPreset": "補正なし",
-        "reductionFactor": 1.00
+        "reductionFactor": 1.00,
+        "icuClass": "standard",
+        "hasELCB": false,
+        "elcbSensitivity_mA": 30,
+        "groundingMethod": "TT",
+        "groundResistance_ohm": 100
       }
     },
     {
@@ -477,6 +556,7 @@
       "order": 2,
       "ts": "2026-02-25T00:11:02.000Z",
       "externalRef": null,
+      "canvas": null,
       "load": {
         "trunkName": "P-1B 組立ライン",
         "loadName": "プレス機 M7",
@@ -496,7 +576,12 @@
         "wiringMethod": "ケーブルラック配線",
         "ambientTemp": 40,
         "reductionPreset": "1段 S=d 7列以上",
-        "reductionFactor": 0.70
+        "reductionFactor": 0.70,
+        "icuClass": "standard",
+        "hasELCB": false,
+        "elcbSensitivity_mA": 30,
+        "groundingMethod": "TT",
+        "groundResistance_ohm": 100
       }
     },
     {
@@ -506,6 +591,7 @@
       "order": 3,
       "ts": "2026-02-25T00:11:03.000Z",
       "externalRef": null,
+      "canvas": null,
       "load": {
         "trunkName": "P-1B 組立ライン",
         "loadName": "組立ライン照明",
@@ -525,7 +611,12 @@
         "wiringMethod": "ケーブルラック配線",
         "ambientTemp": 40,
         "reductionPreset": "1段 S=d 7列以上",
-        "reductionFactor": 0.70
+        "reductionFactor": 0.70,
+        "icuClass": "standard",
+        "hasELCB": false,
+        "elcbSensitivity_mA": 30,
+        "groundingMethod": "TT",
+        "groundResistance_ohm": 100
       }
     },
 
@@ -536,6 +627,7 @@
       "order": 0,
       "ts": "2026-02-25T00:12:00.000Z",
       "externalRef": null,
+      "canvas": null,
       "load": {
         "trunkName": "P-2 高圧動力",
         "loadName": "大型コンプレッサ M8",
@@ -555,7 +647,12 @@
         "wiringMethod": "ケーブルラック配線",
         "ambientTemp": 40,
         "reductionPreset": "1段 S=d 2列",
-        "reductionFactor": 0.85
+        "reductionFactor": 0.85,
+        "icuClass": "standard",
+        "hasELCB": false,
+        "elcbSensitivity_mA": 30,
+        "groundingMethod": "TT",
+        "groundResistance_ohm": 100
       }
     },
     {
@@ -565,6 +662,7 @@
       "order": 1,
       "ts": "2026-02-25T00:12:01.000Z",
       "externalRef": null,
+      "canvas": null,
       "load": {
         "trunkName": "P-2 高圧動力",
         "loadName": "冷凍機 M9",
@@ -584,7 +682,12 @@
         "wiringMethod": "ケーブルラック配線",
         "ambientTemp": 40,
         "reductionPreset": "1段 S=d 2列",
-        "reductionFactor": 0.85
+        "reductionFactor": 0.85,
+        "icuClass": "standard",
+        "hasELCB": false,
+        "elcbSensitivity_mA": 30,
+        "groundingMethod": "TT",
+        "groundResistance_ohm": 100
       }
     },
     {
@@ -594,6 +697,7 @@
       "order": 2,
       "ts": "2026-02-25T00:12:02.000Z",
       "externalRef": null,
+      "canvas": null,
       "load": {
         "trunkName": "P-2 高圧動力",
         "loadName": "送風機 M10",
@@ -613,7 +717,12 @@
         "wiringMethod": "管路布設",
         "ambientTemp": 25,
         "reductionPreset": "補正なし",
-        "reductionFactor": 1.00
+        "reductionFactor": 1.00,
+        "icuClass": "standard",
+        "hasELCB": false,
+        "elcbSensitivity_mA": 30,
+        "groundingMethod": "TT",
+        "groundResistance_ohm": 100
       }
     },
 
@@ -624,6 +733,7 @@
       "order": 0,
       "ts": "2026-02-25T00:13:00.000Z",
       "externalRef": null,
+      "canvas": null,
       "load": {
         "trunkName": "L-1A 1F事務室",
         "loadName": "1F照明",
@@ -643,7 +753,12 @@
         "wiringMethod": "配管配線",
         "ambientTemp": 35,
         "reductionPreset": "補正なし",
-        "reductionFactor": 1.00
+        "reductionFactor": 1.00,
+        "icuClass": "standard",
+        "hasELCB": false,
+        "elcbSensitivity_mA": 30,
+        "groundingMethod": "TT",
+        "groundResistance_ohm": 100
       }
     },
     {
@@ -653,6 +768,7 @@
       "order": 1,
       "ts": "2026-02-25T00:13:01.000Z",
       "externalRef": null,
+      "canvas": null,
       "load": {
         "trunkName": "L-1A 1F事務室",
         "loadName": "1Fコンセント",
@@ -672,7 +788,12 @@
         "wiringMethod": "配管配線",
         "ambientTemp": 35,
         "reductionPreset": "補正なし",
-        "reductionFactor": 1.00
+        "reductionFactor": 1.00,
+        "icuClass": "standard",
+        "hasELCB": false,
+        "elcbSensitivity_mA": 30,
+        "groundingMethod": "TT",
+        "groundResistance_ohm": 100
       }
     },
     {
@@ -682,6 +803,7 @@
       "order": 2,
       "ts": "2026-02-25T00:13:02.000Z",
       "externalRef": null,
+      "canvas": null,
       "load": {
         "trunkName": "L-1A 1F事務室",
         "loadName": "1F空調パッケージ",
@@ -701,7 +823,12 @@
         "wiringMethod": "配管配線",
         "ambientTemp": 35,
         "reductionPreset": "補正なし",
-        "reductionFactor": 1.00
+        "reductionFactor": 1.00,
+        "icuClass": "standard",
+        "hasELCB": false,
+        "elcbSensitivity_mA": 30,
+        "groundingMethod": "TT",
+        "groundResistance_ohm": 100
       }
     },
 
@@ -712,6 +839,7 @@
       "order": 0,
       "ts": "2026-02-25T00:14:00.000Z",
       "externalRef": null,
+      "canvas": null,
       "load": {
         "trunkName": "L-1B 2Fサーバー室",
         "loadName": "サーバーラック A",
@@ -731,7 +859,12 @@
         "wiringMethod": "ケーブルラック配線",
         "ambientTemp": 30,
         "reductionPreset": "1段 S=d 2列",
-        "reductionFactor": 0.85
+        "reductionFactor": 0.85,
+        "icuClass": "standard",
+        "hasELCB": false,
+        "elcbSensitivity_mA": 30,
+        "groundingMethod": "TT",
+        "groundResistance_ohm": 100
       }
     },
     {
@@ -741,6 +874,7 @@
       "order": 1,
       "ts": "2026-02-25T00:14:01.000Z",
       "externalRef": null,
+      "canvas": null,
       "load": {
         "trunkName": "L-1B 2Fサーバー室",
         "loadName": "サーバーラック B",
@@ -760,7 +894,12 @@
         "wiringMethod": "ケーブルラック配線",
         "ambientTemp": 30,
         "reductionPreset": "1段 S=d 2列",
-        "reductionFactor": 0.85
+        "reductionFactor": 0.85,
+        "icuClass": "standard",
+        "hasELCB": false,
+        "elcbSensitivity_mA": 30,
+        "groundingMethod": "TT",
+        "groundResistance_ohm": 100
       }
     },
     {
@@ -770,6 +909,7 @@
       "order": 2,
       "ts": "2026-02-25T00:14:02.000Z",
       "externalRef": null,
+      "canvas": null,
       "load": {
         "trunkName": "L-1B 2Fサーバー室",
         "loadName": "精密空調機 PAC-1",
@@ -789,7 +929,12 @@
         "wiringMethod": "ケーブルラック配線",
         "ambientTemp": 30,
         "reductionPreset": "1段 S=d 2列",
-        "reductionFactor": 0.85
+        "reductionFactor": 0.85,
+        "icuClass": "standard",
+        "hasELCB": false,
+        "elcbSensitivity_mA": 30,
+        "groundingMethod": "TT",
+        "groundResistance_ohm": 100
       }
     },
     {
@@ -799,6 +944,7 @@
       "order": 3,
       "ts": "2026-02-25T00:14:03.000Z",
       "externalRef": null,
+      "canvas": null,
       "load": {
         "trunkName": "L-1B 2Fサーバー室",
         "loadName": "UPS",
@@ -818,7 +964,12 @@
         "wiringMethod": "ケーブルラック配線",
         "ambientTemp": 30,
         "reductionPreset": "1段 S=d 2列",
-        "reductionFactor": 0.85
+        "reductionFactor": 0.85,
+        "icuClass": "standard",
+        "hasELCB": false,
+        "elcbSensitivity_mA": 30,
+        "groundingMethod": "TT",
+        "groundResistance_ohm": 100
       }
     },
 
@@ -829,6 +980,7 @@
       "order": 0,
       "ts": "2026-02-25T00:15:00.000Z",
       "externalRef": null,
+      "canvas": null,
       "load": {
         "trunkName": "S-1 単相主幹",
         "loadName": "外灯",
@@ -848,7 +1000,12 @@
         "wiringMethod": "直埋布設",
         "ambientTemp": 25,
         "reductionPreset": "補正なし",
-        "reductionFactor": 1.00
+        "reductionFactor": 1.00,
+        "icuClass": "standard",
+        "hasELCB": false,
+        "elcbSensitivity_mA": 30,
+        "groundingMethod": "TT",
+        "groundResistance_ohm": 100
       }
     },
     {
@@ -858,6 +1015,7 @@
       "order": 1,
       "ts": "2026-02-25T00:15:01.000Z",
       "externalRef": null,
+      "canvas": null,
       "load": {
         "trunkName": "S-1 単相主幹",
         "loadName": "ポンプ小屋",
@@ -877,7 +1035,12 @@
         "wiringMethod": "直埋布設",
         "ambientTemp": 25,
         "reductionPreset": "補正なし",
-        "reductionFactor": 1.00
+        "reductionFactor": 1.00,
+        "icuClass": "standard",
+        "hasELCB": false,
+        "elcbSensitivity_mA": 30,
+        "groundingMethod": "TT",
+        "groundResistance_ohm": 100
       }
     },
     {
@@ -887,6 +1050,7 @@
       "order": 2,
       "ts": "2026-02-25T00:15:02.000Z",
       "externalRef": null,
+      "canvas": null,
       "load": {
         "trunkName": "S-1 単相主幹",
         "loadName": "守衛室",
@@ -906,7 +1070,12 @@
         "wiringMethod": "管路布設",
         "ambientTemp": 25,
         "reductionPreset": "補正なし",
-        "reductionFactor": 1.00
+        "reductionFactor": 1.00,
+        "icuClass": "standard",
+        "hasELCB": false,
+        "elcbSensitivity_mA": 30,
+        "groundingMethod": "TT",
+        "groundResistance_ohm": 100
       }
     },
 
@@ -917,8 +1086,10 @@
       "order": 3,
       "ts": "2026-02-25T00:04:00.000Z",
       "externalRef": null,
+      "canvas": null,
       "trunk": {
         "name": "LV-1 低圧受電主幹",
+        "branchName": "",
         "system": "三相3線式",
         "voltage": 200,
         "freq": "60Hz",
@@ -930,7 +1101,8 @@
         "reductionPreset": "1段 S=d 7列以上",
         "reductionFactor": 0.70,
         "powerFactor": 0.85,
-        "mccbATOverride": "自動"
+        "mccbATOverride": "自動",
+        "icuClass": "standard"
       }
     },
     {
@@ -940,6 +1112,7 @@
       "order": 0,
       "ts": "2026-02-25T00:16:00.000Z",
       "externalRef": null,
+      "canvas": null,
       "load": {
         "trunkName": "LV-1 低圧受電主幹",
         "loadName": "エアコン室外機",
@@ -959,7 +1132,12 @@
         "wiringMethod": "ケーブルラック配線",
         "ambientTemp": 40,
         "reductionPreset": "1段 S=d 7列以上",
-        "reductionFactor": 0.70
+        "reductionFactor": 0.70,
+        "icuClass": "standard",
+        "hasELCB": false,
+        "elcbSensitivity_mA": 30,
+        "groundingMethod": "TT",
+        "groundResistance_ohm": 100
       }
     },
     {
@@ -969,6 +1147,7 @@
       "order": 1,
       "ts": "2026-02-25T00:16:01.000Z",
       "externalRef": null,
+      "canvas": null,
       "load": {
         "trunkName": "LV-1 低圧受電主幹",
         "loadName": "換気扇",
@@ -988,7 +1167,12 @@
         "wiringMethod": "配管配線",
         "ambientTemp": 50,
         "reductionPreset": "カスタム",
-        "reductionFactor": 0.55
+        "reductionFactor": 0.55,
+        "icuClass": "standard",
+        "hasELCB": false,
+        "elcbSensitivity_mA": 30,
+        "groundingMethod": "TT",
+        "groundResistance_ohm": 100
       }
     },
     {
@@ -998,6 +1182,7 @@
       "order": 2,
       "ts": "2026-02-25T00:16:02.000Z",
       "externalRef": null,
+      "canvas": null,
       "load": {
         "trunkName": "LV-1 低圧受電主幹",
         "loadName": "倉庫照明",
@@ -1017,7 +1202,12 @@
         "wiringMethod": "ケーブルラック配線",
         "ambientTemp": 40,
         "reductionPreset": "1段 S=d 7列以上",
-        "reductionFactor": 0.70
+        "reductionFactor": 0.70,
+        "icuClass": "standard",
+        "hasELCB": false,
+        "elcbSensitivity_mA": 30,
+        "groundingMethod": "TT",
+        "groundResistance_ohm": 100
       }
     },
 
@@ -1028,8 +1218,10 @@
       "order": 1,
       "ts": "2026-02-25T00:05:00.000Z",
       "externalRef": null,
+      "canvas": null,
       "trunk": {
         "name": "L-2 三相4線主幹",
+        "branchName": "",
         "system": "三相4線式",
         "voltage": 200,
         "freq": "60Hz",
@@ -1041,7 +1233,8 @@
         "reductionPreset": "1段 S=d 7列以上",
         "reductionFactor": 0.70,
         "powerFactor": 0.90,
-        "mccbATOverride": "自動"
+        "mccbATOverride": "自動",
+        "icuClass": "standard"
       }
     },
     {
@@ -1051,6 +1244,7 @@
       "order": 0,
       "ts": "2026-02-25T00:17:00.000Z",
       "externalRef": null,
+      "canvas": null,
       "load": {
         "trunkName": "L-2 三相4線主幹",
         "loadName": "分電盤 LP-1",
@@ -1070,7 +1264,12 @@
         "wiringMethod": "ケーブルラック配線",
         "ambientTemp": 35,
         "reductionPreset": "1段 S=d 7列以上",
-        "reductionFactor": 0.70
+        "reductionFactor": 0.70,
+        "icuClass": "standard",
+        "hasELCB": false,
+        "elcbSensitivity_mA": 30,
+        "groundingMethod": "TT",
+        "groundResistance_ohm": 100
       }
     },
     {
@@ -1080,6 +1279,7 @@
       "order": 1,
       "ts": "2026-02-25T00:17:01.000Z",
       "externalRef": null,
+      "canvas": null,
       "load": {
         "trunkName": "L-2 三相4線主幹",
         "loadName": "分電盤 LP-2",
@@ -1099,8 +1299,44 @@
         "wiringMethod": "ケーブルラック配線",
         "ambientTemp": 35,
         "reductionPreset": "1段 S=d 7列以上",
-        "reductionFactor": 0.70
+        "reductionFactor": 0.70,
+        "icuClass": "standard",
+        "hasELCB": false,
+        "elcbSensitivity_mA": 30,
+        "groundingMethod": "TT",
+        "groundResistance_ohm": 100
       }
     }
-  ]
+  ],
+  "groups": [
+    {
+      "id": "grp-01",
+      "name": "TR-1 工場動力",
+      "color": "#e3f2fd",
+      "rootNodeId": "tr-01",
+      "canvas": { "x": 0, "y": 0, "collapsed": false }
+    },
+    {
+      "id": "grp-02",
+      "name": "TR-2 事務所電灯",
+      "color": "#e8f5e9",
+      "rootNodeId": "tr-02",
+      "canvas": { "x": 0, "y": 0, "collapsed": false }
+    },
+    {
+      "id": "grp-03",
+      "name": "TR-3 単相特殊",
+      "color": "#fff3e0",
+      "rootNodeId": "tr-03",
+      "canvas": { "x": 0, "y": 0, "collapsed": false }
+    },
+    {
+      "id": "grp-04",
+      "name": "LV-1 低圧受電主幹",
+      "color": "#fce4ec",
+      "rootNodeId": "trunk-04-lv",
+      "canvas": { "x": 0, "y": 0, "collapsed": false }
+    }
+  ],
+  "crossLinks": []
 }
