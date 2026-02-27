@@ -1859,7 +1859,7 @@ function DiagramCanvas({ nodes, allResults, systemMeta, selectedId, onSelectNode
             fromNode.type === 'load' ||
             (fromNode.type === 'trunk' && !nodes.some(c => c.parentId === fromNode.id && c.type === 'trunk'))
           );
-          const isFeedLinkTarget = target.type === 'trunk' && getDepth(nodes, target.id) === 1;
+          const isFeedLinkTarget = target.type === 'trunk';
           const fromAnc = findAncestorTransformer(nodes, wiring.fromId);
           const toAnc = findAncestorTransformer(nodes, target.id);
           const isDifferentTree = !(fromAnc && toAnc && fromAnc.id === toAnc.id);
@@ -4217,8 +4217,8 @@ function FeedLinkEditor({ feedLinks, nodes, allResults, groups, onAddFeedLink, o
 
   /* 接続元の候補: load ノードと末端 trunk ノード */
   const fromCandidates = nodes.filter(n => n.type === 'load' || (n.type === 'trunk' && !nodes.some(c => c.parentId === n.id && c.type === 'trunk')));
-  /* 接続先の候補: depth=1 の trunk ノード（1層目幹線） */
-  const toCandidates = nodes.filter(n => n.type === 'trunk' && getDepth(nodes, n.id) === 1);
+  /* 接続先の候補: 全 trunk ノード（depth 不問） */
+  const toCandidates = nodes.filter(n => n.type === 'trunk');
 
   const handleAdd = () => {
     if (!fromNodeId || !toNodeId || fromNodeId === toNodeId) return;
