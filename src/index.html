@@ -940,23 +940,41 @@ function calculateAll(nodes, feedLinks) {
     .sort((a, b) => b.depth - a.depth);
   for (const { node } of trunks) {
     const agg = aggregateCurrents(nodes, node.id, results);
-    /* feedLink: このtrunkに接続されている外部負荷の電流を加算 */
-    for (const fl of fLinks) {
-      if (fl.toNodeId === node.id) {
-        const fromR = results[fl.fromNodeId];
-        if (!fromR) continue;
-        const fromNode = nodes.find(n => n.id === fl.fromNodeId);
-        if (!fromNode) continue;
-        const dI = fromR.dI || 0;
-        if (fromNode.type === 'load' && fromNode.load?.circuitType === '電動機') agg.sumIM += dI;
-        else if (fromNode.type === 'trunk') { agg.sumIM += fromR.motorI || 0; agg.sumIH += fromR.generalI || 0; }
-        else agg.sumIH += dI;
-        agg.totalI = agg.sumIM + agg.sumIH;
-        agg.hasMotor = agg.sumIM > 0;
-      }
-    }
     const r = runTrunkCalc(node.trunk, agg);
     if (r) results[node.id] = r;
+  }
+
+  /* 2.5: feedLink 容量同期 — ターゲット trunk の需要でソース load の dI を上書き */
+  for (const fl of fLinks) {
+    const fromNode = nodes.find(n => n.id === fl.fromNodeId);
+    const toNode = nodes.find(n => n.id === fl.toNodeId);
+    if (!fromNode || !toNode) continue;
+    if (fromNode.type !== 'load' || toNode.type !== 'trunk') continue;
+
+    const targetR = results[fl.toNodeId];
+    const sourceR = results[fl.fromNodeId];
+    if (!targetR || !sourceR) continue;
+
+    const childDemand = targetR.totalI || targetR.dI || 0;
+    const originalDI = sourceR.dI;
+
+    /* ソース負荷の dI を上書き */
+    sourceR.dI = childDemand;
+    sourceR.sizingI = fromNode.load.circuitType === '電動機'
+      ? (childDemand <= 50 ? childDemand * 1.25 : childDemand * 1.1)
+      : childDemand;
+    sourceR.feedSyncOverride = { original: originalDI, synced: childDemand, targetTrunkName: toNode.trunk?.name || '' };
+
+    /* ソース負荷の祖先トランクを再計算（ボトムアップ） */
+    let cur = fromNode.parentId;
+    while (cur) {
+      const pNode = nodes.find(n => n.id === cur);
+      if (!pNode || pNode.type !== 'trunk') break;
+      const pAgg = aggregateCurrents(nodes, pNode.id, results);
+      const pR = runTrunkCalc(pNode.trunk, pAgg);
+      if (pR) results[pNode.id] = pR;
+      cur = pNode.parentId;
+    }
   }
 
   /* 3. transformer ノード */
@@ -1697,6 +1715,12 @@ function ModuleLoadNode({ node, result, canvas, selected, mode, direction, onMou
       )}
       {/* 電気方式 */}
       <text x={x + 8} y={y + 58} fontSize={7} fill="#aaa">{p.system} {p.voltage}V</text>
+      {/* feedLink 容量同期バッジ */}
+      {result && result.feedSyncOverride && (
+        <text x={x + w - 4} y={y + 12} fontSize={6} textAnchor="end" fill="#ff6f00" fontWeight={600}>
+          {rd(result.feedSyncOverride.synced, 1)}A (元:{rd(result.feedSyncOverride.original, 1)}A)
+        </text>
+      )}
       {/* feedTo/feedFrom アノテーション */}
       {result && result.feedTo && result.feedTo.length > 0 && (
         <text x={x + w - 4} y={y + h - 3} fontSize={6} textAnchor="end" fill="#e65100" fontWeight={600}>
@@ -1718,7 +1742,7 @@ function ModuleLoadNode({ node, result, canvas, selected, mode, direction, onMou
 
 /* === DIAGRAM: CANVAS COMPONENT (M2-4-1, M2-4-5, M2-4-6) === */
 
-function DiagramCanvas({ nodes, allResults, systemMeta, selectedId, onSelectNode, mode, onNodesChange, groups, crossLinks, feedLinks, onToggleGroupCollapse }) {
+function DiagramCanvas({ nodes, allResults, systemMeta, selectedId, onSelectNode, mode, onNodesChange, groups, crossLinks, feedLinks, onAddFeedLink, onToggleGroupCollapse }) {
   const direction = (systemMeta && systemMeta.diagramDirection) || 'horizontal';
   const svgRef = React.useRef(null);
   const [vt, setVt] = React.useState({ x: 0, y: 0, scale: 1 });
@@ -1829,13 +1853,29 @@ function DiagramCanvas({ nodes, allResults, systemMeta, selectedId, onSelectNode
           return Math.abs(sx - px) < 15 && Math.abs(sy - py) < 15;
         });
         if (target && wiring.fromPort === 'out') {
-          /* 接続: target の parentId を fromId に設定 */
-          const testNodes = nodes.map(n => n.id === target.id ? { ...n, parentId: wiring.fromId } : n);
-          const err = validateNode(testNodes, { ...target, parentId: wiring.fromId });
-          if (!err) {
-            onNodesChange && onNodesChange(prev =>
-              prev.map(n => n.id === target.id ? { ...n, parentId: wiring.fromId } : n)
-            );
+          /* feedLink 判定: 接続元が load/末端trunk、接続先が異なるツリーの depth=1 trunk */
+          const fromNode = nodes.find(n => n.id === wiring.fromId);
+          const isFeedLinkSource = fromNode && (
+            fromNode.type === 'load' ||
+            (fromNode.type === 'trunk' && !nodes.some(c => c.parentId === fromNode.id && c.type === 'trunk'))
+          );
+          const isFeedLinkTarget = target.type === 'trunk' && getDepth(nodes, target.id) === 1;
+          const fromAnc = findAncestorTransformer(nodes, wiring.fromId);
+          const toAnc = findAncestorTransformer(nodes, target.id);
+          const isDifferentTree = !(fromAnc && toAnc && fromAnc.id === toAnc.id);
+
+          if (isFeedLinkSource && isFeedLinkTarget && isDifferentTree && onAddFeedLink) {
+            /* feedLink 接続 */
+            onAddFeedLink({ id: genId(), fromNodeId: wiring.fromId, toNodeId: target.id, label: '' });
+          } else {
+            /* 通常の親子接続 */
+            const testNodes = nodes.map(n => n.id === target.id ? { ...n, parentId: wiring.fromId } : n);
+            const err = validateNode(testNodes, { ...target, parentId: wiring.fromId });
+            if (!err) {
+              onNodesChange && onNodesChange(prev =>
+                prev.map(n => n.id === target.id ? { ...n, parentId: wiring.fromId } : n)
+              );
+            }
           }
         }
         setWiring(null);
@@ -2283,6 +2323,7 @@ const BULK_COLUMNS = [
   { key: 'reductionFactor', label: '低減率',     required: false },
   { key: 'mccbATOverride',  label: 'MCCB AT',    required: false },
   { key: 'trName',          label: '変圧器名',   required: false },
+  { key: 'feedSource',      label: '給電元',     required: false },
 ];
 
 const BULK_HEADER_ROW = BULK_COLUMNS.map(c => c.label).join('\t');
@@ -2290,12 +2331,12 @@ const BULK_HEADER_ROW = BULK_COLUMNS.map(c => c.label).join('\t');
 /* 一括取込テンプレート: ヘッダー + 入力ルール + 入力例 + 選択肢一覧 */
 const BULK_TEMPLATE_ROWS = [
   BULK_COLUMNS.map(c => c.label).join('\t'),
-  ['(必須/任意)', '(任意)', '(選択式)', '(数値 V)', '(必須/数値>0)', '(選択式)', '(選択式)', '(0.10~1.00)', '(0.10~1.00)', '(1~100 %)', '(数値 m)', '(選択式)', '(選択式)', '(選択式)', '(20~50 ℃)', '(0.10~1.00)', '(自動/数値AT)', '(任意)'].join('\t'),
-  ['例:P-1', '例:空調機', '三相3線式', '200', '15', 'kW', '電動機', '0.85', '0.90', '100', '30', '60Hz', 'CVT', 'ケーブルラック配線', '40', '0.70', '自動', 'TR-1'].join('\t'),
-  ['', '', '単相2線式', '100/105/200/210', '', 'kVA', '一般', '', '', '', '', '50Hz', 'CVD', '配管配線', '', '', '', ''].join('\t'),
-  ['', '', '単相3線式', '200/210/400/415', '', 'A', '', '', '', '', '', '', 'CV-3C', '直埋布設', '', '', '', ''].join('\t'),
-  ['', '', '三相4線式', '420/440', '', '', '', '', '', '', '', '', 'CV-2C', '管路布設', '', '', '', ''].join('\t'),
-  ['※空欄はデフォルト値適用', '', '', '', '', '', '', 'kW時は必須', '電動機のみ', '', '', '', '', '', '', '', '', ''].join('\t'),
+  ['(必須/任意)', '(任意)', '(選択式)', '(数値 V)', '(必須/数値>0)', '(選択式)', '(選択式)', '(0.10~1.00)', '(0.10~1.00)', '(1~100 %)', '(数値 m)', '(選択式)', '(選択式)', '(選択式)', '(20~50 ℃)', '(0.10~1.00)', '(自動/数値AT)', '(任意)', '(負荷名称を入力)'].join('\t'),
+  ['例:P-1', '例:空調機', '三相3線式', '200', '15', 'kW', '電動機', '0.85', '0.90', '100', '30', '60Hz', 'CVT', 'ケーブルラック配線', '40', '0.70', '自動', 'TR-1', 'UPS-1'].join('\t'),
+  ['', '', '単相2線式', '100/105/200/210', '', 'kVA', '一般', '', '', '', '', '50Hz', 'CVD', '配管配線', '', '', '', '', ''].join('\t'),
+  ['', '', '単相3線式', '200/210/400/415', '', 'A', '', '', '', '', '', '', 'CV-3C', '直埋布設', '', '', '', '', ''].join('\t'),
+  ['', '', '三相4線式', '420/440', '', '', '', '', '', '', '', '', 'CV-2C', '管路布設', '', '', '', '', ''].join('\t'),
+  ['※空欄はデフォルト値適用', '', '', '', '', '', '', 'kW時は必須', '電動機のみ', '', '', '', '', '', '', '', '', '', ''].join('\t'),
 ].join('\n');
 
 const VALID_SYSTEMS = ['単相2線式', '単相3線式', '三相3線式', '三相4線式'];
@@ -2426,12 +2467,16 @@ function parseBulkRow(cells) {
   /* 変圧器名 */
   const trName = get(17) || '';
 
-  return { params: d, errors, trName };
+  /* 給電元（負荷名称でマッチ） */
+  const feedSource = get(18) || '';
+
+  return { params: d, errors, trName, feedSource };
 }
 
-function BulkImportDialog({ open, onClose, onImport }) {
+function BulkImportDialog({ open, onClose, onImport, nodes }) {
   const [text, setText] = React.useState('');
-  const [parsed, setParsed] = React.useState(null); /* [{ params, result, errors, rowIndex, trName }] */
+  const [parsed, setParsed] = React.useState(null); /* [{ params, result, errors, rowIndex, trName, feedSource, feedCandidates, feedSelected }] */
+  const [feedChoices, setFeedChoices] = React.useState({}); /* { [rowIndex]: selectedCandidateIndex } */
 
   if (!open) return null;
 
@@ -2451,13 +2496,43 @@ function BulkImportDialog({ open, onClose, onImport }) {
     const rows = [];
     for (let i = startIdx; i < lines.length; i++) {
       const cells = lines[i].split('\t');
-      const { params, errors, trName } = parseBulkRow(cells);
+      const { params, errors, trName, feedSource } = parseBulkRow(cells);
       let result = null;
       if (errors.length === 0 && params.capacity > 0) {
         try { result = runCalc(params); } catch (e) { errors.push('計算エラー: ' + e.message); }
       }
-      rows.push({ params, result, errors, rowIndex: i + 1, trName });
+      rows.push({ params, result, errors, rowIndex: i + 1, trName, feedSource, feedCandidates: [], feedSelected: null });
     }
+
+    /* feedSource の候補解決 */
+    for (const row of rows) {
+      if (!row.feedSource) continue;
+      const name = row.feedSource;
+      const candidates = [];
+
+      /* バッチ内の負荷名称を検索 */
+      rows.forEach((r, idx) => {
+        if (r === row) return;
+        if (r.params.loadName === name) {
+          candidates.push({ type: 'batch', batchIdx: idx, loadName: r.params.loadName, trunkName: r.params.trunkName });
+        }
+      });
+
+      /* 既存ノードの負荷名称を検索 */
+      if (nodes) {
+        nodes.filter(n => n.type === 'load' && n.load.loadName === name).forEach(n => {
+          const parentTrunk = nodes.find(t => t.id === n.parentId);
+          candidates.push({ type: 'existing', nodeId: n.id, loadName: n.load.loadName, trunkName: parentTrunk?.trunk?.name || '?' });
+        });
+      }
+
+      row.feedCandidates = candidates;
+      if (candidates.length === 1) row.feedSelected = 0;
+      else if (candidates.length === 0) row.errors.push('給電元が見つかりません: ' + name);
+      /* 複数候補の場合: feedSelected = null → ユーザー選択待ち */
+    }
+
+    setFeedChoices({});
     setParsed(rows);
   };
 
@@ -2469,7 +2544,17 @@ function BulkImportDialog({ open, onClose, onImport }) {
     });
   };
 
-  const validRows = parsed ? parsed.filter(r => r.errors.length === 0) : [];
+  const validRows = parsed ? parsed.filter(r =>
+    r.errors.length === 0 &&
+    (!r.feedSource || r.feedCandidates.length === 1 || feedChoices[r.rowIndex] !== undefined)
+  ) : [];
+
+  const importRows = validRows.map(r => ({
+    ...r,
+    feedSelected: r.feedSource
+      ? (r.feedCandidates.length === 1 ? 0 : feedChoices[r.rowIndex] ?? null)
+      : null
+  }));
 
   const overlayStyle = {
     position: 'fixed', top: 0, left: 0, right: 0, bottom: 0,
@@ -2546,6 +2631,7 @@ function BulkImportDialog({ open, onClose, onImport }) {
                     <th style={{ padding: '4px 6px', textAlign: 'right', borderBottom: '1px solid #ccc' }}>力率</th>
                     <th style={{ padding: '4px 6px', textAlign: 'right', borderBottom: '1px solid #ccc' }}>こう長</th>
                     <th style={{ padding: '4px 6px', textAlign: 'left', borderBottom: '1px solid #ccc' }}>変圧器</th>
+                    <th style={{ padding: '4px 6px', textAlign: 'left', borderBottom: '1px solid #ccc' }}>給電元</th>
                     <th style={{ padding: '4px 6px', textAlign: 'left', borderBottom: '1px solid #ccc' }}>判定</th>
                   </tr>
                 </thead>
@@ -2562,6 +2648,25 @@ function BulkImportDialog({ open, onClose, onImport }) {
                       <td style={{ padding: '3px 6px', textAlign: 'right' }}>{row.params.powerFactor}</td>
                       <td style={{ padding: '3px 6px', textAlign: 'right' }}>{row.params.cableLength}m</td>
                       <td style={{ padding: '3px 6px' }}>{row.trName || '-'}</td>
+                      <td style={{ padding: '3px 6px' }}>
+                        {!row.feedSource ? '-' :
+                          row.feedCandidates.length === 0
+                            ? <span style={{ color: '#f44336' }}>未解決</span>
+                            : row.feedCandidates.length === 1
+                              ? <span style={{ color: '#4caf50' }}>{row.feedCandidates[0].loadName} [{row.feedCandidates[0].trunkName}]</span>
+                              : <select
+                                  value={feedChoices[row.rowIndex] ?? ''}
+                                  onChange={e => setFeedChoices(prev => ({ ...prev, [row.rowIndex]: parseInt(e.target.value, 10) }))}
+                                  style={{ fontSize: 11, padding: '1px 4px' }}>
+                                  <option value="">-- 選択 --</option>
+                                  {row.feedCandidates.map((c, ci) => (
+                                    <option key={ci} value={ci}>
+                                      {c.loadName} [{c.trunkName}] ({c.type === 'batch' ? '取込内' : '既存'})
+                                    </option>
+                                  ))}
+                                </select>
+                        }
+                      </td>
                       <td style={{ padding: '3px 6px' }}>
                         {row.errors.length > 0
                           ? <span style={{ color: '#f44336', fontWeight: 700 }} title={row.errors.join('\n')}>{'× ' + row.errors[0]}</span>
@@ -2583,7 +2688,7 @@ function BulkImportDialog({ open, onClose, onImport }) {
               </button>
               <button
                 disabled={validRows.length === 0}
-                onClick={() => { onImport(validRows); onClose(); }}
+                onClick={() => { onImport(importRows); onClose(); }}
                 style={{
                   padding: '8px 20px', borderRadius: 6, border: 'none', fontWeight: 700, cursor: validRows.length > 0 ? 'pointer' : 'default',
                   background: validRows.length > 0 ? '#1976d2' : '#ccc', color: '#fff'
@@ -3948,6 +4053,11 @@ function TreeTable({ nodes, allResults, selectedId, selectedIds, onSelect, onDel
                 → {r.feedTo.map(ft => ft.toName).join(', ')}
               </span>
             )}
+            {r && r.feedSyncOverride && (
+              <span style={{ fontSize: 10, color: '#ff6f00', marginLeft: 4 }}>
+                同期: {rd(r.feedSyncOverride.synced, 1)}A ← {r.feedSyncOverride.targetTrunkName} (元: {rd(r.feedSyncOverride.original, 1)}A)
+              </span>
+            )}
           </td>
           <td style={{ padding: '6px 4px', fontSize: 12 }}>{sysV}</td>
           <td style={{ padding: '6px 4px', fontSize: 12, textAlign: 'right' }}>
@@ -4953,6 +5063,10 @@ function genDiagramHTML(nodes, allResults, systemMeta, feedLinks) {
       if (r) modSvg += `<text x="${x + 8}" y="${y + 47}" font-size="7" fill="#666">${p.capacity}${esc(p.unit)}  dI=${rd(r.dI, 1)}A  e=${r.vdPercent}%</text>`;
       /* 電気方式 */
       modSvg += `<text x="${x + 8}" y="${y + 58}" font-size="7" fill="#aaa">${esc(p.system)} ${p.voltage}V</text>`;
+      /* feedLink 容量同期バッジ */
+      if (r && r.feedSyncOverride) {
+        modSvg += `<text x="${x + w - 4}" y="${y + 12}" font-size="6" text-anchor="end" fill="#ff6f00" font-weight="600">${rd(r.feedSyncOverride.synced, 1)}A (元:${rd(r.feedSyncOverride.original, 1)}A)</text>`;
+      }
       /* feedTo アノテーション */
       const loadR = allResults[node.id];
       if (loadR && loadR.feedTo && loadR.feedTo.length > 0) {
@@ -5216,10 +5330,13 @@ function App() {
 
   /* --- 一括取込ハンドラ --- */
   const handleBulkImport = (validRows) => {
+    const pendingFeedLinks = [];
+
     setNodes(prev => {
       let updated = [...prev];
+      const loadIdByBatchIdx = {};
 
-      for (const row of validRows) {
+      validRows.forEach((row, batchIdx) => {
         const p = row.params;
         const trName = row.trName || '';
 
@@ -5272,10 +5389,38 @@ function App() {
           load: { ...p }
         };
         updated = addNode(updated, loadNode);
-      }
+
+        /* バッチインデックスで load ID を記録 */
+        loadIdByBatchIdx[batchIdx] = loadNode.id;
+      });
+
+      /* feedLink の作成 */
+      validRows.forEach((row, batchIdx) => {
+        if (!row.feedSource || row.feedSelected == null) return;
+        const candidate = row.feedCandidates[row.feedSelected];
+        if (!candidate) return;
+
+        let fromNodeId;
+        if (candidate.type === 'batch') {
+          fromNodeId = loadIdByBatchIdx[candidate.batchIdx];
+        } else {
+          fromNodeId = candidate.nodeId;
+        }
+
+        const trunk = updated.find(n => n.type === 'trunk' && n.trunk.name === row.params.trunkName);
+        if (fromNodeId && trunk) {
+          pendingFeedLinks.push({ id: genId(), fromNodeId, toNodeId: trunk.id, label: '' });
+        }
+      });
 
       return updated;
     });
+
+    /* feedLink を追加 */
+    if (pendingFeedLinks.length > 0) {
+      setFeedLinks(prev => [...prev, ...pendingFeedLinks]);
+    }
+
     /* 一括取込後にグループを自動生成 */
     setNodes(prev => {
       const newGroups = autoCreateGroups(prev, groups);
@@ -6146,6 +6291,7 @@ function App() {
                 selectedId={selectedId} onSelectNode={handleSelectNode}
                 mode={diagramMode} onNodesChange={setNodes}
                 groups={groups} crossLinks={crossLinks} feedLinks={feedLinks}
+                onAddFeedLink={(fl) => setFeedLinks(prev => [...prev, fl])}
                 onToggleGroupCollapse={handleToggleGroupCollapse}
               />
             </div>
@@ -6170,6 +6316,7 @@ function App() {
         open={showBulkImport}
         onClose={() => setShowBulkImport(false)}
         onImport={handleBulkImport}
+        nodes={nodes}
       />
     </div>
   );
