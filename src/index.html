@@ -944,7 +944,7 @@ function calculateAll(nodes, feedLinks) {
     if (r) results[node.id] = r;
   }
 
-  /* 2.5: feedLink 容量同期 — ターゲット trunk の需要でソース load の dI を上書き */
+  /* 2.5: feedLink 容量同期 — ターゲット trunk の需要でソース load のケーブル・ブレーカを再選定 */
   for (const fl of fLinks) {
     const fromNode = nodes.find(n => n.id === fl.fromNodeId);
     const toNode = nodes.find(n => n.id === fl.toNodeId);
@@ -958,12 +958,20 @@ function calculateAll(nodes, feedLinks) {
     const childDemand = targetR.totalI || targetR.dI || 0;
     const originalDI = sourceR.dI;
 
-    /* ソース負荷の dI を上書き */
-    sourceR.dI = childDemand;
-    sourceR.sizingI = fromNode.load.circuitType === '電動機'
-      ? (childDemand <= 50 ? childDemand * 1.25 : childDemand * 1.1)
-      : childDemand;
-    sourceR.feedSyncOverride = { original: originalDI, synced: childDemand, targetTrunkName: toNode.trunk?.name || '' };
+    /* ソース負荷パラメータを feedLink 需要で上書きして runCalc 再実行 */
+    const syncedParams = { ...fromNode.load, capacity: childDemand, unit: 'A', demandFactor: 100 };
+    const newResult = runCalc(syncedParams);
+    if (newResult) {
+      newResult.feedSyncOverride = { original: originalDI, synced: childDemand, targetTrunkName: toNode.trunk?.name || '' };
+      results[fl.fromNodeId] = newResult;
+    } else {
+      /* フォールバック: dI/sizingI のみ上書き */
+      sourceR.dI = childDemand;
+      sourceR.sizingI = fromNode.load.circuitType === '電動機'
+        ? (childDemand <= 50 ? childDemand * 1.25 : childDemand * 1.1)
+        : childDemand;
+      sourceR.feedSyncOverride = { original: originalDI, synced: childDemand, targetTrunkName: toNode.trunk?.name || '' };
+    }
 
     /* ソース負荷の祖先トランクを再計算（ボトムアップ） */
     let cur = fromNode.parentId;
@@ -1098,6 +1106,14 @@ function calculateAll(nodes, feedLinks) {
     if (toR && toNode) {
       if (!toR.feedFrom) toR.feedFrom = [];
       toR.feedFrom.push({ fromNodeId: fl.fromNodeId, fromName: fromNode?.load?.loadName || fromNode?.trunk?.name || '負荷', label: fl.label });
+    }
+    /* ブレーカ AT 整合性チェック: ソース側 AT がターゲット trunk の AT 未満なら警告 */
+    if (fromR && toR) {
+      const srcAT = fromR.mccbAT || 0;
+      const tgtAT = toR.mccbAT || 0;
+      if (srcAT > 0 && tgtAT > 0 && srcAT < tgtAT) {
+        fromR.feedBreakerMismatch = { sourceAT: srcAT, targetAT: tgtAT, targetName: toNode?.trunk?.name || '幹線' };
+      }
     }
   }
 
@@ -1749,6 +1765,7 @@ function DiagramCanvas({ nodes, allResults, systemMeta, selectedId, onSelectNode
   const [dragging, setDragging] = React.useState(null);     /* { nodeId, offX, offY } */
   const [panning, setPanning] = React.useState(null);         /* { startX, startY, vtX, vtY } */
   const [wiring, setWiring] = React.useState(null);           /* { fromId, fromPort, mx, my } */
+  const [wiringHoverTarget, setWiringHoverTarget] = React.useState(null); /* null | 'valid' | 'invalid' */
 
   /* ホイール操作: 通常=上下スクロール, Shift=左右スクロール, Ctrl=ズーム
      ネイティブリスナー（passive: false）でページ拡大縮小を確実に抑止 */
@@ -1820,11 +1837,36 @@ function DiagramCanvas({ nodes, allResults, systemMeta, selectedId, onSelectNode
       }
       if (wiring) {
         const rect = svgRef.current.getBoundingClientRect();
-        setWiring(prev => ({
-          ...prev,
-          mx: (e.clientX - rect.left - vt.x) / vt.scale,
-          my: (e.clientY - rect.top - vt.y) / vt.scale
-        }));
+        const sx = (e.clientX - rect.left - vt.x) / vt.scale;
+        const sy = (e.clientY - rect.top - vt.y) / vt.scale;
+        setWiring(prev => ({ ...prev, mx: sx, my: sy }));
+        /* ワイヤリング中のホバー先判定 */
+        const dir = DIRECTIONS[direction];
+        const hoverNode = nodes.find(n => {
+          if (n.id === wiring.fromId || !n.canvas) return false;
+          const c = n.canvas;
+          let px, py;
+          if (dir.inPort === 'left') { px = c.x; py = c.y + c.height / 2; }
+          else { px = c.x + c.width / 2; py = c.y; }
+          return Math.abs(sx - px) < 20 && Math.abs(sy - py) < 20;
+        });
+        if (hoverNode) {
+          const fromNode = nodes.find(n => n.id === wiring.fromId);
+          const isFeedLinkSource = fromNode && (
+            fromNode.type === 'load' ||
+            (fromNode.type === 'trunk' && !nodes.some(c => c.parentId === fromNode.id && c.type === 'trunk'))
+          );
+          const isFeedLinkTarget = hoverNode.type === 'trunk';
+          const fromAnc = findAncestorTransformer(nodes, wiring.fromId);
+          const toAnc = findAncestorTransformer(nodes, hoverNode.id);
+          const isDifferentTree = !(fromAnc && toAnc && fromAnc.id === toAnc.id);
+          /* feedLink 接続可能 or 通常親子接続可能かを判定 */
+          const canFeedLink = isFeedLinkSource && isFeedLinkTarget && isDifferentTree;
+          const canParent = !canFeedLink && wiring.fromPort === 'out';
+          setWiringHoverTarget((canFeedLink || canParent) ? 'valid' : 'invalid');
+        } else {
+          setWiringHoverTarget(null);
+        }
       }
     };
     const handleUp = (e) => {
@@ -1878,6 +1920,8 @@ function DiagramCanvas({ nodes, allResults, systemMeta, selectedId, onSelectNode
             }
           }
         }
+        document.body.style.userSelect = '';
+        setWiringHoverTarget(null);
         setWiring(null);
       }
       setPanning(null);
@@ -1913,6 +1957,8 @@ function DiagramCanvas({ nodes, allResults, systemMeta, selectedId, onSelectNode
   /* ポートドラッグ開始（ワイヤリング） */
   const handlePortMouseDown = (nodeId, portType, e) => {
     if (mode !== 'edit') return;
+    e.preventDefault();
+    document.body.style.userSelect = 'none';
     const node = nodes.find(n => n.id === nodeId);
     if (!node || !node.canvas) return;
     const rect = svgRef.current.getBoundingClientRect();
@@ -2007,7 +2053,20 @@ function DiagramCanvas({ nodes, allResults, systemMeta, selectedId, onSelectNode
       fx = dir.inPort === 'left' ? from.canvas.x : from.canvas.x + from.canvas.width / 2;
       fy = dir.inPort === 'left' ? from.canvas.y + from.canvas.height / 2 : from.canvas.y;
     }
-    return <line x1={fx} y1={fy} x2={wiring.mx} y2={wiring.my} stroke="#1976d2" strokeWidth={2} strokeDasharray="4 2" />;
+    const isSnapped = wiringHoverTarget === 'valid';
+    const isInvalid = wiringHoverTarget === 'invalid';
+    const lineColor = isSnapped ? '#4caf50' : isInvalid ? '#f44336' : '#1976d2';
+    return (
+      <React.Fragment>
+        <line x1={fx} y1={fy} x2={wiring.mx} y2={wiring.my}
+          stroke={lineColor} strokeWidth={isSnapped ? 2.5 : 2}
+          strokeDasharray={isSnapped ? '' : '4 2'} />
+        {isSnapped && (
+          <circle cx={wiring.mx} cy={wiring.my} r={8}
+            fill="none" stroke="#4caf50" strokeWidth={2} opacity={0.6} />
+        )}
+      </React.Fragment>
+    );
   };
 
   /* M2-6: 折りたたみグループの所属ノードIDセット */
@@ -2069,6 +2128,8 @@ function DiagramCanvas({ nodes, allResults, systemMeta, selectedId, onSelectNode
   const renderFeedLinks = () => {
     const fLinks = feedLinks || [];
     return fLinks.map(fl => {
+      /* 選択ノードに関連する feedLink のみ表示 */
+      if (!selectedId || (selectedId !== fl.fromNodeId && selectedId !== fl.toNodeId)) return null;
       const fromNode = nodes.find(n => n.id === fl.fromNodeId);
       const toNode = nodes.find(n => n.id === fl.toNodeId);
       if (!fromNode || !toNode || !fromNode.canvas || !toNode.canvas) return null;
@@ -2150,7 +2211,7 @@ function DiagramCanvas({ nodes, allResults, systemMeta, selectedId, onSelectNode
   return (
     <div style={{ width: '100%', height: '100%', position: 'relative', background: '#f8f9fa', overflow: 'hidden' }}>
       <svg ref={svgRef} width="100%" height="100%"
-        style={{ cursor: panning ? 'grabbing' : (mode === 'edit' ? 'default' : 'grab'), touchAction: 'none' }}
+        style={{ cursor: wiring ? (wiringHoverTarget === 'valid' ? 'crosshair' : wiringHoverTarget === 'invalid' ? 'not-allowed' : 'crosshair') : panning ? 'grabbing' : (mode === 'edit' ? 'default' : 'grab'), touchAction: 'none' }}
         onMouseDown={handleBgMouseDown}
       >
         {/* グリッド（編集モード） */}
@@ -3370,6 +3431,16 @@ function ResultPanel({ result, params }) {
           サイジング電流: {r.sizingI} A（{r.dI <= 50 ? '×1.25' : '×1.1'} 補正）
         </div>
       )}
+      {r.feedSyncOverride && (
+        <div style={{ fontSize: 11, color: '#ff6f00', background: '#fff3e0', borderRadius: 4, padding: '3px 8px', marginBottom: 4, fontWeight: 600 }}>
+          feedLink 容量同期: {rd(r.feedSyncOverride.synced, 1)}A ← {r.feedSyncOverride.targetTrunkName}（元: {rd(r.feedSyncOverride.original, 1)}A）
+        </div>
+      )}
+      {r.feedBreakerMismatch && (
+        <div style={{ fontSize: 11, color: '#f44336', background: '#ffebee', borderRadius: 4, padding: '3px 8px', marginBottom: 4, fontWeight: 600 }}>
+          AT 不整合: ソース {r.feedBreakerMismatch.sourceAT}AT &lt; {r.feedBreakerMismatch.targetName} {r.feedBreakerMismatch.targetAT}AT
+        </div>
+      )}
 
       {/* 2段目: [許容電流] [電圧降下] */}
       <div style={rowStyle}>
@@ -4056,6 +4127,11 @@ function TreeTable({ nodes, allResults, selectedId, selectedIds, onSelect, onDel
             {r && r.feedSyncOverride && (
               <span style={{ fontSize: 10, color: '#ff6f00', marginLeft: 4 }}>
                 同期: {rd(r.feedSyncOverride.synced, 1)}A ← {r.feedSyncOverride.targetTrunkName} (元: {rd(r.feedSyncOverride.original, 1)}A)
+              </span>
+            )}
+            {r && r.feedBreakerMismatch && (
+              <span style={{ fontSize: 10, color: '#f44336', marginLeft: 4, fontWeight: 600 }}>
+                AT不足: {r.feedBreakerMismatch.sourceAT}AT &lt; {r.feedBreakerMismatch.targetName} {r.feedBreakerMismatch.targetAT}AT
               </span>
             )}
           </td>
@@ -5192,7 +5268,7 @@ function App() {
   });
   const [rightPaneView, setRightPaneView] = React.useState('table'); /* 'table' | 'diagram' | 'split' */
   const [diagramMode, setDiagramMode] = React.useState('edit'); /* 'edit' | 'view' */
-  const [resultCollapsed, setResultCollapsed] = React.useState(false); /* 結果パネル折りたたみ */
+  const [resultCollapsed, setResultCollapsed] = React.useState(true); /* 結果パネル折りたたみ（デフォルト折り畳み） */
   const [showBulkImport, setShowBulkImport] = React.useState(false);
 
   /* --- M2-6: グループ管理ステート --- */
@@ -6166,7 +6242,7 @@ function App() {
                 if (!hasResult) return null;
 
                 return (
-                  <div style={{ marginBottom: 8 }}>
+                  <div style={{ marginBottom: 8, position: 'sticky', top: 0, zIndex: 10, background: '#f5f5f5', paddingBottom: 4, borderBottom: '1px solid #e0e0e0' }}>
                     {/* 折りたたみヘッダー */}
                     <div
                       onClick={() => setResultCollapsed(prev => !prev)}
