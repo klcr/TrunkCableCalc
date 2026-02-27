@@ -1718,7 +1718,7 @@ function ModuleLoadNode({ node, result, canvas, selected, mode, direction, onMou
 
 /* === DIAGRAM: CANVAS COMPONENT (M2-4-1, M2-4-5, M2-4-6) === */
 
-function DiagramCanvas({ nodes, allResults, systemMeta, selectedId, onSelectNode, mode, onNodesChange, groups, crossLinks, feedLinks, onToggleGroupCollapse }) {
+function DiagramCanvas({ nodes, allResults, systemMeta, selectedId, onSelectNode, mode, onNodesChange, groups, crossLinks, feedLinks, onAddFeedLink, onToggleGroupCollapse }) {
   const direction = (systemMeta && systemMeta.diagramDirection) || 'horizontal';
   const svgRef = React.useRef(null);
   const [vt, setVt] = React.useState({ x: 0, y: 0, scale: 1 });
@@ -1829,13 +1829,29 @@ function DiagramCanvas({ nodes, allResults, systemMeta, selectedId, onSelectNode
           return Math.abs(sx - px) < 15 && Math.abs(sy - py) < 15;
         });
         if (target && wiring.fromPort === 'out') {
-          /* 接続: target の parentId を fromId に設定 */
-          const testNodes = nodes.map(n => n.id === target.id ? { ...n, parentId: wiring.fromId } : n);
-          const err = validateNode(testNodes, { ...target, parentId: wiring.fromId });
-          if (!err) {
-            onNodesChange && onNodesChange(prev =>
-              prev.map(n => n.id === target.id ? { ...n, parentId: wiring.fromId } : n)
-            );
+          /* feedLink 判定: 接続元が load/末端trunk、接続先が異なるツリーの depth=1 trunk */
+          const fromNode = nodes.find(n => n.id === wiring.fromId);
+          const isFeedLinkSource = fromNode && (
+            fromNode.type === 'load' ||
+            (fromNode.type === 'trunk' && !nodes.some(c => c.parentId === fromNode.id && c.type === 'trunk'))
+          );
+          const isFeedLinkTarget = target.type === 'trunk' && getDepth(nodes, target.id) === 1;
+          const fromAnc = findAncestorTransformer(nodes, wiring.fromId);
+          const toAnc = findAncestorTransformer(nodes, target.id);
+          const isDifferentTree = !(fromAnc && toAnc && fromAnc.id === toAnc.id);
+
+          if (isFeedLinkSource && isFeedLinkTarget && isDifferentTree && onAddFeedLink) {
+            /* feedLink 接続 */
+            onAddFeedLink({ id: genId(), fromNodeId: wiring.fromId, toNodeId: target.id, label: '' });
+          } else {
+            /* 通常の親子接続 */
+            const testNodes = nodes.map(n => n.id === target.id ? { ...n, parentId: wiring.fromId } : n);
+            const err = validateNode(testNodes, { ...target, parentId: wiring.fromId });
+            if (!err) {
+              onNodesChange && onNodesChange(prev =>
+                prev.map(n => n.id === target.id ? { ...n, parentId: wiring.fromId } : n)
+              );
+            }
           }
         }
         setWiring(null);
@@ -6146,6 +6162,7 @@ function App() {
                 selectedId={selectedId} onSelectNode={handleSelectNode}
                 mode={diagramMode} onNodesChange={setNodes}
                 groups={groups} crossLinks={crossLinks} feedLinks={feedLinks}
+                onAddFeedLink={(fl) => setFeedLinks(prev => [...prev, fl])}
                 onToggleGroupCollapse={handleToggleGroupCollapse}
               />
             </div>
