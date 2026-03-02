@@ -277,17 +277,19 @@ function runCalc(p) {
   /* 8-1: 設計電流 */
   const V = p.voltage, PF = p.powerFactor, EFF = p.efficiency;
   const three = isThreePhase(p.system);
+  const sf = (p.spareFactor || 0) / 100;
+  const effectiveCap = p.capacity * (1 + sf);
   let rawI;
   if (p.unit === 'kW') {
     rawI = three
-      ? p.capacity * 1000 / (Math.sqrt(3) * V * PF * EFF)
-      : p.capacity * 1000 / (V * PF * EFF);
+      ? effectiveCap * 1000 / (Math.sqrt(3) * V * PF * EFF)
+      : effectiveCap * 1000 / (V * PF * EFF);
   } else if (p.unit === 'kVA') {
     rawI = three
-      ? p.capacity * 1000 / (Math.sqrt(3) * V)
-      : p.capacity * 1000 / V;
+      ? effectiveCap * 1000 / (Math.sqrt(3) * V)
+      : effectiveCap * 1000 / V;
   } else {
-    rawI = p.capacity;
+    rawI = effectiveCap;
   }
   const dI = rawI * p.demandFactor / 100;
 
@@ -337,7 +339,8 @@ function runCalc(p) {
       effectiveAmpacity: rd(eA), Z: rd(Z, 4), K,
       vd: rd(vd), vdPercent: rd(vdP),
       allowVd: rd(baseV * allowVdP / 100), allowVdPercent: allowVdP,
-      ampacityOK: true, vdOK: true, protOK: true
+      ampacityOK: true, vdOK: true, protOK: true,
+      spareFactor: p.spareFactor || 0, baseV
     };
   }
 
@@ -359,7 +362,8 @@ function runCalc(p) {
           effectiveAmpacity: rd(eA2), Z: rd(Z2, 4), K,
           vd: rd(vd2), vdPercent: rd(vdP2),
           allowVd: rd(baseV * allowVdP / 100), allowVdPercent: allowVdP,
-          ampacityOK: true, vdOK: true, protOK: true
+          ampacityOK: true, vdOK: true, protOK: true,
+          spareFactor: p.spareFactor || 0, baseV
         };
       }
       /* 325×2 でも不適合 — NG 結果を返す */
@@ -370,7 +374,8 @@ function runCalc(p) {
         vd: rd(vd2), vdPercent: rd(vdP2),
         allowVd: rd(baseV * allowVdP / 100), allowVdPercent: allowVdP,
         ampacityOK: eA2 >= sizingI, vdOK: vdP2 <= allowVdP,
-        protOK: p.circuitType === '電動機' ? eA2 >= mccbAT / 2.5 : eA2 >= mccbAT
+        protOK: p.circuitType === '電動機' ? eA2 >= mccbAT / 2.5 : eA2 >= mccbAT,
+        spareFactor: p.spareFactor || 0, baseV
       };
     }
   }
@@ -391,7 +396,8 @@ function runCalc(p) {
     vd: rd(vd), vdPercent: rd(vdP),
     allowVd: rd(baseV * allowVdP / 100), allowVdPercent: allowVdP,
     ampacityOK: eA >= sizingI, vdOK: vdP <= allowVdP,
-    protOK: p.circuitType === '電動機' ? eA >= mccbAT / 2.5 : eA >= mccbAT
+    protOK: p.circuitType === '電動機' ? eA >= mccbAT / 2.5 : eA >= mccbAT,
+    spareFactor: p.spareFactor || 0, baseV
   };
 }
 
@@ -721,6 +727,42 @@ function calcCumulativeVd(nodes, nodeId, parentCumVd, allResults) {
 }
 
 /**
+ * calcPathLength — ルートからノードまでの総ケーブル亘長 [m]
+ * feedLink 接続は考慮しない（calculateAll 内で別途加算する）
+ */
+function calcPathLength(nodes, nodeId) {
+  let total = 0;
+  let cur = nodeId;
+  while (cur) {
+    const n = nodes.find(nd => nd.id === cur);
+    if (!n) break;
+    const cfg = n.type === 'trunk' ? n.trunk : n.type === 'load' ? n.load : null;
+    if (cfg && cfg.cableLength) total += cfg.cableLength;
+    cur = n.parentId;
+  }
+  return total;
+}
+
+/**
+ * calcTrunkCumulativeVd — ルートからこのノードまでの幹線区間VDの合計 [V]
+ * （trunk ノードのVDのみを合算、load のVDは含まない）
+ */
+function calcTrunkCumulativeVd(nodes, nodeId, allResults) {
+  let cumVd = 0;
+  let cur = nodeId;
+  while (cur) {
+    const n = nodes.find(nd => nd.id === cur);
+    if (!n) break;
+    if (n.type === 'trunk') {
+      const r = allResults[cur];
+      if (r && r.vd) cumVd += r.vd;
+    }
+    cur = n.parentId;
+  }
+  return cumVd;
+}
+
+/**
  * calcFaultCurrents — トップダウン R+jX ベクトル累積による短絡電流計算 (§20-2, §20-3)
  */
 function calcFaultCurrents(nodes, allResults) {
@@ -994,6 +1036,69 @@ function calculateAll(nodes, feedLinks) {
   const roots = nodes.filter(n => !n.parentId);
   for (const root of roots) {
     calcCumulativeVd(nodes, root.id, 0, results);
+  }
+
+  /* 4.2: feedLink 上流VD伝搬 */
+  for (const fl of fLinks) {
+    const fromR = results[fl.fromNodeId];
+    const toNode = nodes.find(n => n.id === fl.toNodeId);
+    if (!fromR || !toNode || fromR.cumulativeVd == null) continue;
+    const upstreamVd = fromR.cumulativeVd;
+    const fromPathLen = calcPathLength(nodes, fl.fromNodeId);
+    const addUpstreamVd = (nId) => {
+      const r = results[nId];
+      if (r) {
+        r.cumulativeVd = rd((r.cumulativeVd || 0) + upstreamVd);
+        const bV = r.baseV || (r.allowVdPercent && r.allowVd ? r.allowVd / r.allowVdPercent * 100 : 0);
+        r.cumulativeVdP = bV > 0 ? rd(r.cumulativeVd / bV * 100) : 0;
+        r.upstreamVd = rd(upstreamVd);
+        r.upstreamPathLength = rd(fromPathLen, 1);
+      }
+      for (const child of getChildren(nodes, nId)) addUpstreamVd(child.id);
+    };
+    addUpstreamVd(fl.toNodeId);
+  }
+
+  /* 4.5: 亘長ベース電圧降下判定 */
+  for (const n of nodes) {
+    if (n.type === 'transformer') continue;
+    const r = results[n.id];
+    if (!r) continue;
+
+    const cfg = n.type === 'trunk' ? n.trunk : n.load;
+    const sup = cfg.supplyType || (n.type === 'trunk' ? cfg.supplyType : '低圧受電');
+    let totalPath = calcPathLength(nodes, n.id);
+    if (r.upstreamPathLength) totalPath += r.upstreamPathLength;
+    const baseV = r.baseV || (r.allowVdPercent && r.allowVd ? r.allowVd / r.allowVdPercent * 100 : 0);
+
+    const allowVdP = getAllowVdP(totalPath, sup);
+    r.totalPathLength = rd(totalPath, 1);
+    r.pathAllowVdPercent = allowVdP;
+    r.pathAllowVd = baseV > 0 ? rd(baseV * allowVdP / 100) : 0;
+
+    if (totalPath <= 60) {
+      if (n.type === 'trunk') {
+        const trunkCumVd = calcTrunkCumulativeVd(nodes, n.id, results);
+        const effTrunkVd = trunkCumVd + (r.upstreamVd || 0);
+        const trunkCumVdP = baseV > 0 ? effTrunkVd / baseV * 100 : 0;
+        r.trunkCumulativeVd = rd(effTrunkVd);
+        r.trunkCumulativeVdP = rd(trunkCumVdP);
+        r.pathVdOK = trunkCumVdP <= allowVdP;
+        r.vdJudgeType = 'trunk';
+        r.vdJudgeValue = rd(trunkCumVdP);
+      } else {
+        r.pathVdOK = (r.vdPercent || 0) <= allowVdP;
+        r.vdJudgeType = 'branch';
+        r.vdJudgeValue = r.vdPercent;
+      }
+    } else {
+      r.pathVdOK = (r.cumulativeVdP || 0) <= allowVdP;
+      r.vdJudgeType = 'cumulative';
+      r.vdJudgeValue = r.cumulativeVdP;
+    }
+    r.vdJudgeLimit = allowVdP;
+
+    if (!r.pathVdOK) r.ok = false;
   }
 
   /* 5. トップダウン: 短絡電流 */
@@ -2323,6 +2428,7 @@ const SLIDER_CFG = {
   powerFactor:  { step: 0.01, range: 0.30 },
   efficiency:   { step: 0.01, range: 0.30 },
   demandFactor: { step: 1,   range: 50 },
+  spareFactor:  { step: 5,   range: 50 },
   cableLength:  { step: 0.5, range: 100 },
   ambientTemp:  { step: 5,   range: 15 },
   reductionFactor: { step: 0.01, range: 0.30 }
@@ -2334,7 +2440,7 @@ const DEFAULT_PARAMS = {
   system: '三相3線式', voltage: 200, freq: '60Hz', supplyType: '低圧受電',
   circuitType: '一般', mccbATOverride: '自動', icuClass: 'standard',
   capacity: 15, unit: 'kW', powerFactor: 0.85, efficiency: 1.0,
-  demandFactor: 100, cableLength: 30,
+  demandFactor: 100, spareFactor: 0, cableLength: 30,
   cableType: 'CVT', wiringMethod: 'ケーブルラック配線',
   ambientTemp: 40, reductionPreset: '1段 S=d 7列以上', reductionFactor: 0.70,
   hasELCB: false, elcbSensitivity_mA: 30, groundingMethod: 'TT', groundResistance_ohm: 100
@@ -2376,6 +2482,7 @@ const BULK_COLUMNS = [
   { key: 'powerFactor',     label: '力率',       required: false },
   { key: 'efficiency',      label: '効率',       required: false },
   { key: 'demandFactor',    label: '需要率',     required: false },
+  { key: 'spareFactor',     label: '予備率',     required: false },
   { key: 'cableLength',     label: 'こう長',     required: false },
   { key: 'freq',            label: '周波数',     required: false },
   { key: 'cableType',       label: 'ケーブル種類', required: false },
@@ -2476,60 +2583,67 @@ function parseBulkRow(cells) {
     else errors.push('需要率が不正: ' + get(9));
   }
 
-  /* こう長 */
+  /* 予備率 */
   if (get(10)) {
-    const cl = parseFloat(get(10));
+    const sf = parseFloat(get(10));
+    if (!isNaN(sf) && sf >= 0 && sf <= 100) d.spareFactor = sf;
+    else errors.push('予備率が不正: ' + get(10));
+  }
+
+  /* こう長 */
+  if (get(11)) {
+    const cl = parseFloat(get(11));
     if (!isNaN(cl) && cl > 0) d.cableLength = cl;
-    else errors.push('こう長が不正: ' + get(10));
+    else errors.push('こう長が不正: ' + get(11));
   }
 
   /* 周波数 */
-  if (get(11)) {
-    if (VALID_FREQS.includes(get(11))) d.freq = get(11);
-    else errors.push('周波数が不正: ' + get(11));
+  if (get(12)) {
+    if (VALID_FREQS.includes(get(12))) d.freq = get(12);
+    else errors.push('周波数が不正: ' + get(12));
   }
 
   /* ケーブル種類 */
-  if (get(12)) {
-    if (VALID_CABLE_TYPES.includes(get(12))) d.cableType = get(12);
-    else errors.push('ケーブル種類が不正: ' + get(12));
+  if (get(13)) {
+    if (VALID_CABLE_TYPES.includes(get(13))) d.cableType = get(13);
+    else errors.push('ケーブル種類が不正: ' + get(13));
   }
 
   /* 配線方式 */
-  if (get(13)) {
-    if (VALID_WIRING_METHODS.includes(get(13))) d.wiringMethod = get(13);
-    else errors.push('配線方式が不正: ' + get(13));
+  if (get(14)) {
+    if (VALID_WIRING_METHODS.includes(get(14))) d.wiringMethod = get(14);
+    else errors.push('配線方式が不正: ' + get(14));
   }
 
   /* 周囲温度 */
-  if (get(14)) {
-    const t = parseFloat(get(14));
+  if (get(15)) {
+    const t = parseFloat(get(15));
     if (!isNaN(t) && t >= 20 && t <= 50) d.ambientTemp = t;
-    else errors.push('周囲温度が不正: ' + get(14));
+    else errors.push('周囲温度が不正: ' + get(15));
   }
 
   /* 低減率 */
-  if (get(15)) {
-    const rf = parseFloat(get(15));
+  if (get(16)) {
+    const rf = parseFloat(get(16));
     if (!isNaN(rf) && rf >= 0.1 && rf <= 1.0) d.reductionFactor = rf;
-    else errors.push('低減率が不正: ' + get(15));
+    else errors.push('低減率が不正: ' + get(16));
   }
 
   /* MCCB AT */
-  if (get(16)) {
-    if (get(16) === '自動') d.mccbATOverride = '自動';
+  if (get(17)) {
+    if (get(17) === '自動') d.mccbATOverride = '自動';
     else {
-      const at = parseInt(get(16), 10);
+      const at = parseInt(get(17), 10);
       if (!isNaN(at) && at > 0) d.mccbATOverride = at;
-      else errors.push('MCCB ATが不正: ' + get(16));
+      else errors.push('MCCB ATが不正: ' + get(17));
     }
   }
 
   /* 変圧器名 */
-  const trName = get(17) || '';
+  const trName = get(18) || '';
 
   /* 給電元（負荷名称でマッチ） */
-  const feedSource = get(18) || '';
+  const feedSource = get(19) || '';
 
   return { params: d, errors, trName, feedSource };
 }
@@ -3431,6 +3545,11 @@ function ResultPanel({ result, params }) {
           サイジング電流: {r.sizingI} A（{r.dI <= 50 ? '×1.25' : '×1.1'} 補正）
         </div>
       )}
+      {!isTrunk && r.spareFactor > 0 && (
+        <div style={{ fontSize: 11, color: '#666', background: '#f5f5f5', borderRadius: 4, padding: '3px 8px', marginBottom: 4 }}>
+          予備率: {r.spareFactor}%（容量 ×{rd(1 + r.spareFactor / 100, 2)}）
+        </div>
+      )}
       {r.feedSyncOverride && (
         <div style={{ fontSize: 11, color: '#ff6f00', background: '#fff3e0', borderRadius: 4, padding: '3px 8px', marginBottom: 4, fontWeight: 600 }}>
           feedLink 容量同期: {rd(r.feedSyncOverride.synced, 1)}A ← {r.feedSyncOverride.targetTrunkName}（元: {rd(r.feedSyncOverride.original, 1)}A）
@@ -3459,7 +3578,7 @@ function ResultPanel({ result, params }) {
         </div>
         <div style={cellStyle}>
           <div style={{ display: 'flex', alignItems: 'center', gap: 6, marginBottom: 4 }}>
-            <Badge ok={r.vdOK} label="電圧降下" />
+            <Badge ok={r.pathVdOK != null ? r.pathVdOK : r.vdOK} label="電圧降下" />
             {hFor('vd')}
           </div>
           <div style={detailRow}><span>Z</span><span>{r.Z} Ω/km</span></div>
@@ -3468,6 +3587,28 @@ function ResultPanel({ result, params }) {
             <span>降下量</span><span>{r.vd} V ({r.vdPercent}%)</span>
           </div>
           <div style={detailRow}><span>許容値</span><span>{r.allowVd} V ({r.allowVdPercent}%)</span></div>
+          {r.totalPathLength != null && (
+            <div style={{ marginTop: 4, paddingTop: 4, borderTop: '1px dashed #e0e0e0' }}>
+              <div style={detailRow}>
+                <span>総亘長</span>
+                <span>{r.totalPathLength}m</span>
+              </div>
+              <div style={detailRow}>
+                <span>判定モード</span>
+                <span>{r.vdJudgeType === 'trunk' ? '幹線累積' : r.vdJudgeType === 'branch' ? '分岐単独' : '累積'}</span>
+              </div>
+              <div style={{ ...detailRow, fontWeight: 700, color: r.pathVdOK ? '#4caf50' : '#f44336' }}>
+                <span>亘長判定</span>
+                <span>{r.vdJudgeValue}% / {r.vdJudgeLimit}%</span>
+              </div>
+              {r.upstreamVd != null && r.upstreamVd > 0 && (
+                <div style={{ ...detailRow, color: '#e65100' }}>
+                  <span>上流VD加算</span>
+                  <span>{r.upstreamVd} V</span>
+                </div>
+              )}
+            </div>
+          )}
         </div>
       </div>
 
@@ -4139,6 +4280,22 @@ function TreeTable({ nodes, allResults, selectedId, selectedIds, onSelect, onDel
           <td style={{ padding: '6px 4px', fontSize: 12, textAlign: 'right' }}>
             {r && r.dI != null ? `${r.dI}A` : r && r.In != null ? `${rd(r.In)}A` : '-'}
           </td>
+          <td style={{ padding: '6px 4px', fontSize: 12, textAlign: 'right' }}>
+            {isTr ? '-' : `${(isTrunk ? node.trunk?.cableLength : node.load?.cableLength) || '-'}m`}
+          </td>
+          <td style={{ padding: '6px 4px', fontSize: 11, textAlign: 'center' }}>
+            {(() => {
+              if (isTr) return '-';
+              const parts = [];
+              if (r && r.sizingI && r.dI && rd(r.sizingI) !== rd(r.dI)) {
+                parts.push('×' + rd(r.sizingI / r.dI, 2));
+              }
+              if (!isTrunk && node.load?.spareFactor > 0) {
+                parts.push('予' + node.load.spareFactor + '%');
+              }
+              return parts.length > 0 ? parts.join(' ') : '-';
+            })()}
+          </td>
           <td style={{ padding: '6px 4px', fontSize: 12 }}>
             {r && r.size ? `${cType} ${r.size}${r.parallel > 1 ? '×' + r.parallel : ''}` : '-'}
           </td>
@@ -4146,10 +4303,38 @@ function TreeTable({ nodes, allResults, selectedId, selectedIds, onSelect, onDel
             {r && r.mccbAT ? `${r.mccbAT}` : '-'}
           </td>
           <td style={{ padding: '6px 4px', fontSize: 12, textAlign: 'right' }}>
-            {r && r.vd != null ? `${r.vd}V (${r.vdPercent}%)` : '-'}
+            {r && r.vd != null ? (
+              <React.Fragment>
+                <span>{r.vd}V ({r.vdPercent}%)</span>
+                {r.cumulativeVd != null && rd(r.cumulativeVd) > rd(r.vd) && (
+                  <div style={{ fontSize: 10, color: '#888' }}>
+                    累積{r.cumulativeVd}V ({r.cumulativeVdP}%)
+                  </div>
+                )}
+                {r.upstreamVd != null && r.upstreamVd > 0 && (
+                  <div style={{ fontSize: 9, color: '#e65100' }}>
+                    上流{r.upstreamVd}V含
+                  </div>
+                )}
+              </React.Fragment>
+            ) : '-'}
           </td>
           <td style={{ padding: '6px 4px', fontSize: 12 }}>
-            {r && r.ok != null ? <Badge ok={r.ok} label={r.systemMismatch ? '方式NG' : (r.ok ? 'OK' : 'NG')} /> : '-'}
+            {r && r.ok != null ? (
+              <React.Fragment>
+                <Badge ok={r.ok} label={
+                  r.systemMismatch ? '方式NG'
+                  : r.pathVdOK === false ? 'VD超過'
+                  : (r.ok ? 'OK' : 'NG')
+                } />
+                {r.pathVdOK === false && r.vdJudgeType && (
+                  <div style={{ fontSize: 9, color: '#f44336', marginTop: 1 }}>
+                    {r.vdJudgeType === 'trunk' ? '幹線累積' : r.vdJudgeType === 'branch' ? '分岐' : '累積'}
+                    {r.vdJudgeValue}%{'>'}{r.vdJudgeLimit}%
+                  </div>
+                )}
+              </React.Fragment>
+            ) : '-'}
           </td>
           <td style={{ padding: '6px 4px', fontSize: 12, textAlign: 'right' }}>
             {r && r.Isc3 ? `${rd(r.Isc3 / 1000, 1)}kA` : '-'}
@@ -4193,7 +4378,7 @@ function TreeTable({ nodes, allResults, selectedId, selectedIds, onSelect, onDel
       <React.Fragment key={'grp-' + grp.id}>
         <tr onClick={() => toggleCollapse(grp.id)}
           style={{ background: grp.color || '#e3f2fd', cursor: 'pointer', borderBottom: '2px solid #bbb', borderTop: '2px solid #bbb' }}>
-          <td colSpan={8} style={{ padding: '8px 8px', fontSize: 13, fontWeight: 700 }}>
+          <td colSpan={10} style={{ padding: '8px 8px', fontSize: 13, fontWeight: 700 }}>
             <span style={{ marginRight: 8, fontSize: 10, color: '#666' }}>{isCollapsed ? '▶' : '▼'}</span>
             {grp.name}
             <span style={{ marginLeft: 12, fontSize: 11, fontWeight: 400, color: '#666' }}>
@@ -4210,7 +4395,7 @@ function TreeTable({ nodes, allResults, selectedId, selectedIds, onSelect, onDel
           const fromGrp = grps.find(g => g.id === cl.fromGroupId);
           return (
             <tr key={'cl-in-' + cl.id} style={{ background: '#fffde7', borderBottom: '1px solid #eee' }}>
-              <td colSpan={11} style={{ padding: '3px 8px 3px 28px', fontSize: 11, color: '#795548' }}>
+              <td colSpan={13} style={{ padding: '3px 8px 3px 28px', fontSize: 11, color: '#795548' }}>
                 ← {fromGrp?.name || '?'} から{cl.linkType === 'emergency' ? '非常用' : cl.linkType === 'backup' ? 'バックアップ' : cl.linkType === 'tie' ? '連絡' : ''}給電
                 {cl.label ? ` (${cl.label})` : ''}
               </td>
@@ -4221,7 +4406,7 @@ function TreeTable({ nodes, allResults, selectedId, selectedIds, onSelect, onDel
           const toGrp = grps.find(g => g.id === cl.toGroupId);
           return (
             <tr key={'cl-out-' + cl.id} style={{ background: '#fff8e1', borderBottom: '1px solid #eee' }}>
-              <td colSpan={11} style={{ padding: '3px 8px 3px 28px', fontSize: 11, color: '#795548' }}>
+              <td colSpan={13} style={{ padding: '3px 8px 3px 28px', fontSize: 11, color: '#795548' }}>
                 → {toGrp?.name || '?'} へ{cl.linkType === 'emergency' ? '非常用' : cl.linkType === 'backup' ? 'バックアップ' : cl.linkType === 'tie' ? '連絡' : ''}給電
                 {cl.label ? ` (${cl.label})` : ''}
               </td>
@@ -4249,6 +4434,8 @@ function TreeTable({ nodes, allResults, selectedId, selectedIds, onSelect, onDel
             <th style={{ padding: '6px 4px', textAlign: 'left', fontSize: 12 }}>名称</th>
             <th style={{ padding: '6px 4px', textAlign: 'left', fontSize: 12 }}>方式/電圧</th>
             <th style={{ padding: '6px 4px', textAlign: 'right', fontSize: 12 }}>設計I</th>
+            <th style={{ padding: '6px 4px', textAlign: 'right', fontSize: 12 }}>こう長</th>
+            <th style={{ padding: '6px 4px', textAlign: 'center', fontSize: 12 }}>補正</th>
             <th style={{ padding: '6px 4px', textAlign: 'left', fontSize: 12 }}>ケーブル</th>
             <th style={{ padding: '6px 4px', textAlign: 'right', fontSize: 12 }}>AT</th>
             <th style={{ padding: '6px 4px', textAlign: 'right', fontSize: 12 }}>e [V]</th>
@@ -4269,7 +4456,7 @@ function TreeTable({ nodes, allResults, selectedId, selectedIds, onSelect, onDel
           {/* 未分類のルートノード */}
           {ungroupedRoots.length > 0 && grps.length > 0 && (
             <tr style={{ background: '#f5f5f5', borderBottom: '1px solid #ccc', borderTop: '2px solid #bbb' }}>
-              <td colSpan={11} style={{ padding: '6px 8px', fontSize: 12, fontWeight: 600, color: '#999' }}>
+              <td colSpan={13} style={{ padding: '6px 8px', fontSize: 12, fontWeight: 600, color: '#999' }}>
                 未分類
               </td>
             </tr>
@@ -4697,14 +4884,18 @@ function genPDF(nodes, allResults) {
         system: '', voltage: `${tr.primaryV || ''}/${tr.secondaryV || ''}`,
         mccbAT: '', loadName: tr.trType || '',
         capacity: `${tr.capacity_kVA || ''}kVA`, dI: r ? `${rd(r.In)}` : '',
+        correction: '',
         cableLength: '', cableSpec: '', wiring: '',
         baseAmpacity: '', reductionFactor: '', effectiveAmpacity: '',
         K: '', cosT: '', Z: '', vd: '', allowVd: '', judge: '',
-        pctZ: tr.pctZ != null ? `%Z=${tr.pctZ}` : ''
+        pctZ: tr.pctZ != null ? `%Z=${tr.pctZ}` : '',
+        totalPathLength: '', vdJudgeType: ''
       });
     } else if (node.type === 'trunk') {
       const t = node.trunk || {};
       const sizeStr = r ? `${r.size}${r.parallel > 1 ? '×' + r.parallel : ''}` : '';
+      const tCorrParts = [];
+      if (r && r.sizingI && r.dI && rd(r.sizingI) !== rd(r.dI)) tCorrParts.push('×' + rd(r.sizingI / r.dI, 2));
       rows.push({
         type: 'trunk', depth,
         trunkName: t.name || '',
@@ -4713,6 +4904,7 @@ function genPDF(nodes, allResults) {
         loadName: '',
         capacity: r && r.totalI != null ? `${r.totalI}A(合計)` : '',
         dI: r ? r.sizingI : '',
+        correction: tCorrParts.join(' '),
         cableLength: t.cableLength || '',
         cableSpec: r ? `${t.cableType} ${sizeStr}` : '',
         wiring: t.wiringMethod ? t.wiringMethod.replace('配線', '').replace('布設', '') : '',
@@ -4724,19 +4916,25 @@ function genPDF(nodes, allResults) {
         Z: r ? r.Z : '',
         vd: r ? `${r.vd}V (${r.vdPercent}%)` : '',
         allowVd: r ? `${r.allowVd}V (${r.allowVdPercent}%)` : '',
-        judge: r ? (r.ok ? 'OK' : 'NG') : ''
+        judge: r ? (r.ok ? 'OK' : 'NG') : '',
+        totalPathLength: r ? r.totalPathLength : '',
+        vdJudgeType: r ? r.vdJudgeType : ''
       });
     } else if (node.type === 'load') {
       const p = node.load || {};
       const sizeStr = r ? `${r.size}${r.parallel > 1 ? '×' + r.parallel : ''}` : '';
+      const corrParts = [];
+      if (r && r.sizingI && r.dI && rd(r.sizingI) !== rd(r.dI)) corrParts.push('×' + rd(r.sizingI / r.dI, 2));
+      if (p.spareFactor > 0) corrParts.push('予' + p.spareFactor + '%');
       rows.push({
         type: 'load', depth,
         trunkName: '',
         system: p.system || '', voltage: p.voltage || '',
         mccbAT: r ? r.mccbAT : '',
-        loadName: p.loadName || '',
+        loadName: p.loadName || (corrParts.length > 0 ? '' : ''),
         capacity: p.unit === 'A' ? `${p.capacity}A` : `${p.capacity}${p.unit}`,
         dI: r ? r.dI : '',
+        correction: corrParts.join(' '),
         cableLength: p.cableLength || '',
         cableSpec: r ? `${p.cableType} ${sizeStr}` : '',
         wiring: p.wiringMethod ? p.wiringMethod.replace('配線', '').replace('布設', '') : '',
@@ -4748,7 +4946,9 @@ function genPDF(nodes, allResults) {
         Z: r ? r.Z : '',
         vd: r ? `${r.vd}V (${r.vdPercent}%)` : '',
         allowVd: r ? `${r.allowVd}V (${r.allowVdPercent}%)` : '',
-        judge: r ? (r.ok ? 'OK' : 'NG') : ''
+        judge: r ? (r.ok ? 'OK' : 'NG') : '',
+        totalPathLength: r ? r.totalPathLength : '',
+        vdJudgeType: r ? r.vdJudgeType : ''
       });
     }
     if (node.children) {
@@ -4771,6 +4971,7 @@ function genPDF(nodes, allResults) {
       <td>${esc(row.loadName)}</td>
       <td class="r">${esc(String(row.capacity))}</td>
       <td class="r">${esc(String(row.dI))}</td>
+      <td class="r">${esc(String(row.correction || ''))}</td>
       <td class="r">${esc(String(row.cableLength))}</td>
       <td>${esc(row.cableSpec)}</td>
       <td>${esc(row.wiring)}</td>
@@ -4822,6 +5023,7 @@ td.r { text-align: right; }
   <th rowspan="2">負荷名称</th>
   <th rowspan="2">負荷容量</th>
   <th rowspan="2">設計電流<br>[A]</th>
+  <th rowspan="2">補正</th>
   <th rowspan="2">L<br>[m]</th>
   <th colspan="5">許容電流</th>
   <th colspan="5">電圧降下</th>
@@ -5247,6 +5449,7 @@ function App() {
     powerFactor: String(DEFAULT_PARAMS.powerFactor),
     efficiency: String(DEFAULT_PARAMS.efficiency),
     demandFactor: String(DEFAULT_PARAMS.demandFactor),
+    spareFactor: String(DEFAULT_PARAMS.spareFactor),
     cableLength: String(DEFAULT_PARAMS.cableLength),
     ambientTemp: String(DEFAULT_PARAMS.ambientTemp),
     reductionFactor: String(DEFAULT_PARAMS.reductionFactor)
@@ -5363,6 +5566,7 @@ function App() {
       powerFactor: String(DEFAULT_PARAMS.powerFactor),
       efficiency: String(DEFAULT_PARAMS.efficiency),
       demandFactor: String(DEFAULT_PARAMS.demandFactor),
+      spareFactor: String(DEFAULT_PARAMS.spareFactor),
       cableLength: String(DEFAULT_PARAMS.cableLength),
       ambientTemp: String(DEFAULT_PARAMS.ambientTemp),
       reductionFactor: String(DEFAULT_PARAMS.reductionFactor)
@@ -5687,6 +5891,7 @@ function App() {
         powerFactor: String(DEFAULT_PARAMS.powerFactor),
         efficiency: String(DEFAULT_PARAMS.efficiency),
         demandFactor: String(DEFAULT_PARAMS.demandFactor),
+        spareFactor: String(DEFAULT_PARAMS.spareFactor),
         cableLength: String(DEFAULT_PARAMS.cableLength),
         ambientTemp: String(DEFAULT_PARAMS.ambientTemp),
         reductionFactor: String(DEFAULT_PARAMS.reductionFactor)
@@ -5710,6 +5915,7 @@ function App() {
       setDisplay({
         capacity: String(p.capacity), powerFactor: String(p.powerFactor),
         efficiency: String(p.efficiency), demandFactor: String(p.demandFactor),
+        spareFactor: String(p.spareFactor || 0),
         cableLength: String(p.cableLength), ambientTemp: String(p.ambientTemp),
         reductionFactor: String(p.reductionFactor)
       });
@@ -5745,7 +5951,7 @@ function App() {
             if (existingIds.has(n.id)) { newId = genId(); idMap[n.id] = newId; }
             /* M2-3: 新フィールドのデフォルト補完 */
             if (n.type === 'load' && n.load) {
-              n.load = { ...n.load, icuClass: n.load.icuClass || 'standard', hasELCB: n.load.hasELCB || false, elcbSensitivity_mA: n.load.elcbSensitivity_mA || 30, groundingMethod: n.load.groundingMethod || 'TT', groundResistance_ohm: n.load.groundResistance_ohm || 100 };
+              n.load = { ...n.load, spareFactor: n.load.spareFactor || 0, icuClass: n.load.icuClass || 'standard', hasELCB: n.load.hasELCB || false, elcbSensitivity_mA: n.load.elcbSensitivity_mA || 30, groundingMethod: n.load.groundingMethod || 'TT', groundResistance_ohm: n.load.groundResistance_ohm || 100 };
             }
             if (n.type === 'trunk' && n.trunk) {
               n.trunk = { ...n.trunk, icuClass: n.trunk.icuClass || 'standard', branchName: n.trunk.branchName || '', branchMainMCCB: n.trunk.branchMainMCCB || '自動' };
@@ -6079,6 +6285,12 @@ function App() {
                   <SliderInput value={params.demandFactor} displayValue={display.demandFactor}
                     cfg={SLIDER_CFG.demandFactor} min={1} max={100}
                     onChange={v => updateNumLive('demandFactor', v)} onConfirm={() => confirmNum('demandFactor')} />
+                </RC>
+                <RC label="予備率 [%]">
+                  <SliderInput value={params.spareFactor} displayValue={display.spareFactor}
+                    cfg={SLIDER_CFG.spareFactor} min={0} max={100}
+                    onChange={v => updateNumLive('spareFactor', v)} onConfirm={() => confirmNum('spareFactor')} />
+                  <span style={{ fontSize: 10, color: '#888' }}>将来用スペースの見込み</span>
                 </RC>
                 <RC label="こう長 [m]">
                   <SliderInput value={params.cableLength} displayValue={display.cableLength}
