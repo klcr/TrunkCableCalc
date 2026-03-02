@@ -2724,6 +2724,7 @@ const DEFAULT_TRUNK_PARAMS = {
 
 const BULK_COLUMNS = [
   { key: 'trunkName',       label: '幹線名',     required: true },
+  { key: 'branchName',      label: '分岐名称',   required: false },
   { key: 'loadName',        label: '負荷名称',   required: false },
   { key: 'system',          label: '電気方式',   required: false },
   { key: 'voltage',         label: '電圧',       required: false },
@@ -2750,12 +2751,12 @@ const BULK_HEADER_ROW = BULK_COLUMNS.map(c => c.label).join('\t');
 /* 一括取込テンプレート: ヘッダー + 入力ルール + 入力例 + 選択肢一覧 */
 const BULK_TEMPLATE_ROWS = [
   BULK_COLUMNS.map(c => c.label).join('\t'),
-  ['(必須/任意)', '(任意)', '(選択式)', '(数値 V)', '(必須/数値>0)', '(選択式)', '(選択式)', '(0.10~1.00)', '(0.10~1.00)', '(1~100 %)', '(数値 m)', '(選択式)', '(選択式)', '(選択式)', '(20~50 ℃)', '(0.10~1.00)', '(自動/数値AT)', '(任意)', '(負荷名称を入力)'].join('\t'),
-  ['例:P-1', '例:空調機', '三相3線式', '200', '15', 'kW', '電動機', '0.85', '0.90', '100', '30', '60Hz', 'CVT', 'ケーブルラック配線', '40', '0.70', '自動', 'TR-1', 'UPS-1'].join('\t'),
-  ['', '', '単相2線式', '100/105/200/210', '', 'kVA', '一般', '', '', '', '', '50Hz', 'CVD', '配管配線', '', '', '', '', ''].join('\t'),
-  ['', '', '単相3線式', '200/210/400/415', '', 'A', '', '', '', '', '', '', 'CV-3C', '直埋布設', '', '', '', '', ''].join('\t'),
-  ['', '', '三相4線式', '420/440', '', '', '', '', '', '', '', '', 'CV-2C', '管路布設', '', '', '', '', ''].join('\t'),
-  ['※空欄はデフォルト値適用', '', '', '', '', '', '', 'kW時は必須', '電動機のみ', '', '', '', '', '', '', '', '', '', ''].join('\t'),
+  ['(必須/任意)', '(任意)', '(任意)', '(選択式)', '(数値 V)', '(必須/数値>0)', '(選択式)', '(選択式)', '(0.10~1.00)', '(0.10~1.00)', '(1~100 %)', '(0~100 %)', '(数値 m)', '(選択式)', '(選択式)', '(選択式)', '(20~50 ℃)', '(0.10~1.00)', '(自動/数値AT)', '(任意)', '(負荷名称を入力)'].join('\t'),
+  ['例:P-1', '例:P-1A', '例:空調機', '三相3線式', '200', '15', 'kW', '電動機', '0.85', '0.90', '100', '0', '30', '60Hz', 'CVT', 'ケーブルラック配線', '40', '0.70', '自動', 'TR-1', 'UPS-1'].join('\t'),
+  ['', '', '', '単相2線式', '100/105/200/210', '', 'kVA', '一般', '', '', '', '', '', '50Hz', 'CVD', '配管配線', '', '', '', '', ''].join('\t'),
+  ['', '', '', '単相3線式', '200/210/400/415', '', 'A', '', '', '', '', '', '', '', 'CV-3C', '直埋布設', '', '', '', '', ''].join('\t'),
+  ['', '', '', '三相4線式', '420/440', '', '', '', '', '', '', '', '', '', 'CV-2C', '管路布設', '', '', '', '', ''].join('\t'),
+  ['※空欄はデフォルト値適用', '', '', '', '', '', '', '', 'kW時は必須', '電動機のみ', '', '', '', '', '', '', '', '', '', '', ''].join('\t'),
 ].join('\n');
 
 const VALID_SYSTEMS = ['単相2線式', '単相3線式', '三相3線式', '三相4線式'];
@@ -2776,127 +2777,130 @@ function parseBulkRow(cells) {
   if (!trunkName) errors.push('幹線名が未入力');
   else d.trunkName = trunkName;
 
+  /* 分岐名称 */
+  const branchName = get(1) || '';
+
   /* 負荷名称 */
-  if (get(1)) d.loadName = get(1);
+  if (get(2)) d.loadName = get(2);
 
   /* 電気方式 */
-  if (get(2)) {
-    if (VALID_SYSTEMS.includes(get(2))) d.system = get(2);
-    else errors.push('電気方式が不正: ' + get(2));
+  if (get(3)) {
+    if (VALID_SYSTEMS.includes(get(3))) d.system = get(3);
+    else errors.push('電気方式が不正: ' + get(3));
   }
 
   /* 電圧 */
-  if (get(3)) {
-    const v = parseFloat(get(3));
+  if (get(4)) {
+    const v = parseFloat(get(4));
     if (!isNaN(v) && v > 0) d.voltage = v;
-    else errors.push('電圧が不正: ' + get(3));
+    else errors.push('電圧が不正: ' + get(4));
   }
 
   /* 容量（必須） */
-  if (get(4)) {
-    const c = parseFloat(get(4));
+  if (get(5)) {
+    const c = parseFloat(get(5));
     if (!isNaN(c) && c > 0) d.capacity = c;
-    else errors.push('容量が不正: ' + get(4));
+    else errors.push('容量が不正: ' + get(5));
   } else {
     errors.push('容量が未入力');
   }
 
   /* 単位 */
-  if (get(5)) {
-    if (VALID_UNITS.includes(get(5))) d.unit = get(5);
-    else errors.push('単位が不正: ' + get(5));
+  if (get(6)) {
+    if (VALID_UNITS.includes(get(6))) d.unit = get(6);
+    else errors.push('単位が不正: ' + get(6));
   }
 
   /* 回路種別 */
-  if (get(6)) {
-    if (VALID_CIRCUIT_TYPES.includes(get(6))) d.circuitType = get(6);
-    else errors.push('回路種別が不正: ' + get(6));
+  if (get(7)) {
+    if (VALID_CIRCUIT_TYPES.includes(get(7))) d.circuitType = get(7);
+    else errors.push('回路種別が不正: ' + get(7));
   }
 
   /* 力率 */
-  if (get(7)) {
-    const pf = parseFloat(get(7));
+  if (get(8)) {
+    const pf = parseFloat(get(8));
     if (!isNaN(pf) && pf >= 0.1 && pf <= 1.0) d.powerFactor = pf;
-    else errors.push('力率が不正: ' + get(7));
+    else errors.push('力率が不正: ' + get(8));
   }
 
   /* 効率 */
-  if (get(8)) {
-    const ef = parseFloat(get(8));
+  if (get(9)) {
+    const ef = parseFloat(get(9));
     if (!isNaN(ef) && ef >= 0.1 && ef <= 1.0) d.efficiency = ef;
-    else errors.push('効率が不正: ' + get(8));
+    else errors.push('効率が不正: ' + get(9));
   }
 
   /* 需要率 */
-  if (get(9)) {
-    const df = parseFloat(get(9));
+  if (get(10)) {
+    const df = parseFloat(get(10));
     if (!isNaN(df) && df >= 1 && df <= 100) d.demandFactor = df;
-    else errors.push('需要率が不正: ' + get(9));
+    else errors.push('需要率が不正: ' + get(10));
   }
 
   /* 予備率 */
-  if (get(10)) {
-    const sf = parseFloat(get(10));
+  if (get(11)) {
+    const sf = parseFloat(get(11));
     if (!isNaN(sf) && sf >= 0 && sf <= 100) d.spareFactor = sf;
-    else errors.push('予備率が不正: ' + get(10));
+    else errors.push('予備率が不正: ' + get(11));
   }
 
   /* こう長 */
-  if (get(11)) {
-    const cl = parseFloat(get(11));
+  if (get(12)) {
+    const cl = parseFloat(get(12));
     if (!isNaN(cl) && cl > 0) d.cableLength = cl;
-    else errors.push('こう長が不正: ' + get(11));
+    else errors.push('こう長が不正: ' + get(12));
   }
 
   /* 周波数 */
-  if (get(12)) {
-    if (VALID_FREQS.includes(get(12))) d.freq = get(12);
-    else errors.push('周波数が不正: ' + get(12));
+  if (get(13)) {
+    if (VALID_FREQS.includes(get(13))) d.freq = get(13);
+    else errors.push('周波数が不正: ' + get(13));
   }
 
   /* ケーブル種類 */
-  if (get(13)) {
-    if (VALID_CABLE_TYPES.includes(get(13))) d.cableType = get(13);
-    else errors.push('ケーブル種類が不正: ' + get(13));
+  if (get(14)) {
+    if (VALID_CABLE_TYPES.includes(get(14))) d.cableType = get(14);
+    else errors.push('ケーブル種類が不正: ' + get(14));
   }
 
   /* 配線方式 */
-  if (get(14)) {
-    if (VALID_WIRING_METHODS.includes(get(14))) d.wiringMethod = get(14);
-    else errors.push('配線方式が不正: ' + get(14));
+  if (get(15)) {
+    if (VALID_WIRING_METHODS.includes(get(15))) d.wiringMethod = get(15);
+    else errors.push('配線方式が不正: ' + get(15));
   }
 
   /* 周囲温度 */
-  if (get(15)) {
-    const t = parseFloat(get(15));
+  if (get(16)) {
+    const t = parseFloat(get(16));
     if (!isNaN(t) && t >= 20 && t <= 50) d.ambientTemp = t;
-    else errors.push('周囲温度が不正: ' + get(15));
+    else errors.push('周囲温度が不正: ' + get(16));
   }
 
   /* 低減率 */
-  if (get(16)) {
-    const rf = parseFloat(get(16));
+  if (get(17)) {
+    const rf = parseFloat(get(17));
     if (!isNaN(rf) && rf >= 0.1 && rf <= 1.0) d.reductionFactor = rf;
-    else errors.push('低減率が不正: ' + get(16));
+    else errors.push('低減率が不正: ' + get(17));
   }
 
   /* MCCB AT */
-  if (get(17)) {
-    if (get(17) === '自動') d.mccbATOverride = '自動';
+  if (get(18)) {
+    if (get(18) === '自動') d.mccbATOverride = '自動';
     else {
-      const at = parseInt(get(17), 10);
+      const at = parseInt(get(18), 10);
       if (!isNaN(at) && at > 0) d.mccbATOverride = at;
-      else errors.push('MCCB ATが不正: ' + get(17));
+      else errors.push('MCCB ATが不正: ' + get(18));
     }
   }
 
   /* 変圧器名 */
-  const trName = get(18) || '';
+  const trName = get(19) || '';
 
   /* 給電元（負荷名称でマッチ） */
-  const feedSource = get(19) || '';
+  const feedSource = get(20) || '';
 
-  return { params: d, errors, trName, feedSource };
+  return { params: d, errors, trName, feedSource, branchName };
 }
 
 function BulkImportDialog({ open, onClose, onImport, nodes }) {
@@ -2922,12 +2926,12 @@ function BulkImportDialog({ open, onClose, onImport, nodes }) {
     const rows = [];
     for (let i = startIdx; i < lines.length; i++) {
       const cells = lines[i].split('\t');
-      const { params, errors, trName, feedSource } = parseBulkRow(cells);
+      const { params, errors, trName, feedSource, branchName } = parseBulkRow(cells);
       let result = null;
       if (errors.length === 0 && params.capacity > 0) {
         try { result = runCalc(params); } catch (e) { errors.push('計算エラー: ' + e.message); }
       }
-      rows.push({ params, result, errors, rowIndex: i + 1, trName, feedSource, feedCandidates: [], feedSelected: null });
+      rows.push({ params, result, errors, rowIndex: i + 1, trName, feedSource, branchName, feedCandidates: [], feedSelected: null });
     }
 
     /* feedSource の候補解決 */
@@ -3019,7 +3023,7 @@ function BulkImportDialog({ open, onClose, onImport, nodes }) {
         <textarea
           value={text}
           onChange={e => { setText(e.target.value); setParsed(null); }}
-          placeholder={'幹線名\t負荷名称\t電気方式\t電圧\t容量\t...\nP-1\tM1\t三相3線式\t200\t15\t...'}
+          placeholder={'幹線名\t分岐名称\t負荷名称\t電気方式\t電圧\t容量\t...\nP-1\tP-1A\tM1\t三相3線式\t200\t15\t...'}
           style={{
             width: '100%', height: 140, fontFamily: 'monospace', fontSize: 12,
             border: '1px solid #ccc', borderRadius: 6, padding: 8, resize: 'vertical',
@@ -3049,6 +3053,7 @@ function BulkImportDialog({ open, onClose, onImport, nodes }) {
                   <tr style={{ background: '#f5f5f5', position: 'sticky', top: 0 }}>
                     <th style={{ padding: '4px 6px', textAlign: 'left', borderBottom: '1px solid #ccc' }}>#</th>
                     <th style={{ padding: '4px 6px', textAlign: 'left', borderBottom: '1px solid #ccc' }}>幹線名</th>
+                    <th style={{ padding: '4px 6px', textAlign: 'left', borderBottom: '1px solid #ccc' }}>分岐名称</th>
                     <th style={{ padding: '4px 6px', textAlign: 'left', borderBottom: '1px solid #ccc' }}>負荷名</th>
                     <th style={{ padding: '4px 6px', textAlign: 'left', borderBottom: '1px solid #ccc' }}>方式</th>
                     <th style={{ padding: '4px 6px', textAlign: 'right', borderBottom: '1px solid #ccc' }}>電圧</th>
@@ -3066,6 +3071,7 @@ function BulkImportDialog({ open, onClose, onImport, nodes }) {
                     <tr key={i} style={{ background: row.errors.length > 0 ? '#ffebee' : (i % 2 === 0 ? '#fff' : '#fafafa') }}>
                       <td style={{ padding: '3px 6px' }}>{row.rowIndex}</td>
                       <td style={{ padding: '3px 6px' }}>{row.params.trunkName}</td>
+                      <td style={{ padding: '3px 6px' }}>{row.branchName || '-'}</td>
                       <td style={{ padding: '3px 6px' }}>{row.params.loadName}</td>
                       <td style={{ padding: '3px 6px' }}>{row.params.system}</td>
                       <td style={{ padding: '3px 6px', textAlign: 'right' }}>{row.params.voltage}V</td>
@@ -5929,11 +5935,15 @@ function App() {
             canvas: null,
             trunk: {
               ...DEFAULT_TRUNK_PARAMS, name: p.trunkName,
+              branchName: row.branchName || '',
               system: p.system, voltage: p.voltage,
               freq: p.freq, supplyType: trNode ? '高圧受電' : p.supplyType
             }
           };
           updated = addNode(updated, trunk);
+        } else if (row.branchName && !trunk.trunk.branchName) {
+          /* 既存幹線に分岐名称が未設定の場合、取込データで補完 */
+          trunk.trunk.branchName = row.branchName;
         }
 
         /* 負荷ノード作成 */
