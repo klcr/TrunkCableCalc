@@ -273,7 +273,7 @@ function rd(v, n = 2) { const m = Math.pow(10, n); return Math.round(v * m) / m;
  * @param {Object} p - 入力パラメータ
  * @returns {Object} 計算結果（ok, size, dI, sizingI, mccbAT, 各判定フラグ等）
  */
-function runCalc(p) {
+function runCalc(p, opts) {
   /* 8-1: 設計電流 */
   const V = p.voltage, PF = p.powerFactor, EFF = p.efficiency;
   const three = isThreePhase(p.system);
@@ -301,7 +301,9 @@ function runCalc(p) {
   /* 電圧降下パラメータ */
   const { K, baseV } = getVdParams(p.system, V);
   const sinT = Math.sqrt(1 - PF * PF);
-  const allowVdP = getAllowVdP(p.cableLength, p.supplyType);
+  const baseAllowVdP = getAllowVdP(p.cableLength, p.supplyType);
+  const allowVdP = opts && opts.maxVdP != null ? Math.min(baseAllowVdP, opts.maxVdP) : baseAllowVdP;
+  const _vdBudget = opts && opts.maxVdP != null ? { vdBudgetApplied: true, vdBudget: rd(allowVdP) } : {};
 
   /* 温度補正 */
   const tF = getTempFactor(p.wiringMethod, p.ambientTemp);
@@ -340,7 +342,7 @@ function runCalc(p) {
       vd: rd(vd), vdPercent: rd(vdP),
       allowVd: rd(baseV * allowVdP / 100), allowVdPercent: allowVdP,
       ampacityOK: true, vdOK: true, protOK: true,
-      spareFactor: p.spareFactor || 0, baseV
+      spareFactor: p.spareFactor || 0, baseV, ..._vdBudget
     };
   }
 
@@ -363,7 +365,7 @@ function runCalc(p) {
           vd: rd(vd2), vdPercent: rd(vdP2),
           allowVd: rd(baseV * allowVdP / 100), allowVdPercent: allowVdP,
           ampacityOK: true, vdOK: true, protOK: true,
-          spareFactor: p.spareFactor || 0, baseV
+          spareFactor: p.spareFactor || 0, baseV, ..._vdBudget
         };
       }
       /* 325×2 でも不適合 — NG 結果を返す */
@@ -375,7 +377,7 @@ function runCalc(p) {
         allowVd: rd(baseV * allowVdP / 100), allowVdPercent: allowVdP,
         ampacityOK: eA2 >= sizingI, vdOK: vdP2 <= allowVdP,
         protOK: p.circuitType === '電動機' ? eA2 >= mccbAT / 2.5 : eA2 >= mccbAT,
-        spareFactor: p.spareFactor || 0, baseV
+        spareFactor: p.spareFactor || 0, baseV, ..._vdBudget
       };
     }
   }
@@ -397,7 +399,7 @@ function runCalc(p) {
     allowVd: rd(baseV * allowVdP / 100), allowVdPercent: allowVdP,
     ampacityOK: eA >= sizingI, vdOK: vdP <= allowVdP,
     protOK: p.circuitType === '電動機' ? eA >= mccbAT / 2.5 : eA >= mccbAT,
-    spareFactor: p.spareFactor || 0, baseV
+    spareFactor: p.spareFactor || 0, baseV, ..._vdBudget
   };
 }
 
@@ -601,7 +603,7 @@ function checkBranchBreaker(IW, IB, branchLength, hasBranchLine) {
 /**
  * runTrunkCalc — 幹線ノードのケーブルサイズ選定
  */
-function runTrunkCalc(trunk, agg) {
+function runTrunkCalc(trunk, agg, opts) {
   const { sumIM, sumIH, totalI, hasMotor } = agg;
   if (totalI === 0) return null;
 
@@ -613,7 +615,9 @@ function runTrunkCalc(trunk, agg) {
 
   const { K, baseV } = getVdParams(sys, V);
   const sinT = Math.sqrt(1 - PF * PF);
-  const allowVdP = getAllowVdP(trunk.cableLength, sup);
+  const baseAllowVdP = getAllowVdP(trunk.cableLength, sup);
+  const allowVdP = opts && opts.maxVdP != null ? Math.min(baseAllowVdP, opts.maxVdP) : baseAllowVdP;
+  const _vdBudget = opts && opts.maxVdP != null ? { vdBudgetApplied: true, vdBudget: rd(allowVdP) } : {};
   const tF = getTempFactor(trunk.wiringMethod, trunk.ambientTemp);
 
   const mccbTh = hasMotor ? totalI * 1.25 : totalI;
@@ -647,7 +651,7 @@ function runTrunkCalc(trunk, agg) {
       effectiveAmpacity: rd(eA), Z: rd(Z, 4), K,
       vd: rd(vd), vdPercent: rd(vdP),
       allowVd: rd(baseV * allowVdP / 100), allowVdPercent: allowVdP,
-      ampacityOK: true, vdOK: true, protOK: true, baseV
+      ampacityOK: true, vdOK: true, protOK: true, baseV, ..._vdBudget
     };
   }
 
@@ -671,7 +675,7 @@ function runTrunkCalc(trunk, agg) {
           effectiveAmpacity: rd(eA2), Z: rd(Z2, 4), K,
           vd: rd(vd2), vdPercent: rd(vdP2),
           allowVd: rd(baseV * allowVdP / 100), allowVdPercent: allowVdP,
-          ampacityOK: true, vdOK: true, protOK: true, baseV
+          ampacityOK: true, vdOK: true, protOK: true, baseV, ..._vdBudget
         };
       }
       return {
@@ -683,7 +687,7 @@ function runTrunkCalc(trunk, agg) {
         vd: rd(vd2), vdPercent: rd(vdP2),
         allowVd: rd(baseV * allowVdP / 100), allowVdPercent: allowVdP,
         ampacityOK: eA2 >= sizingI, vdOK: vdP2 <= allowVdP,
-        protOK: hasMotor ? eA2 >= mccbAT / 2.5 : eA2 >= mccbAT, baseV
+        protOK: hasMotor ? eA2 >= mccbAT / 2.5 : eA2 >= mccbAT, baseV, ..._vdBudget
       };
     }
   }
@@ -706,7 +710,7 @@ function runTrunkCalc(trunk, agg) {
     vd: rd(vd), vdPercent: rd(vdP),
     allowVd: rd(baseV * allowVdP / 100), allowVdPercent: allowVdP,
     ampacityOK: eA >= sizingI, vdOK: vdP <= allowVdP,
-    protOK: hasMotor ? eA >= mccbAT / 2.5 : eA >= mccbAT, baseV
+    protOK: hasMotor ? eA >= mccbAT / 2.5 : eA >= mccbAT, baseV, ..._vdBudget
   };
 }
 
@@ -963,11 +967,79 @@ function checkELCB(loadParams, Ig_lv) {
   return null;
 }
 
+/* === VD AUTO-RESIZE HELPERS === */
+
+/**
+ * getSizeIndex — ケーブルサイズの序数を返す（VD予算配分用）
+ * parallel=2 の場合は sizes.length を返す（最大サイズ+1相当）
+ */
+function getSizeIndex(cableType, size, parallel) {
+  const sizes = getCableSizes(cableType);
+  if (parallel >= 2) return sizes.length;
+  const idx = sizes.indexOf(size);
+  return idx >= 0 ? idx : sizes.length - 1;
+}
+
+/**
+ * getAmpacityMinSize — 許容電流のみで決まる最小サイズを返す
+ * VD・保護協調を無視し、eA >= sizingI を満たす最小サイズ
+ */
+function getAmpacityMinSize(cableType, wiringMethod, sizingI, tF, rF) {
+  const sizes = getCableSizes(cableType);
+  for (const sz of sizes) {
+    const bA = getBaseAmpacity(cableType, wiringMethod, sz);
+    if (bA === null) continue;
+    if (bA * tF * rF >= sizingI) return sz;
+  }
+  return sizes[sizes.length - 1];
+}
+
+/**
+ * distributeVdBudget — 経路上のtrunkにVD予算を配分
+ *
+ * @param {Array} pathTrunks — 経路上のtrunkノード（上位→下位順）
+ * @param {Object} results — 計算結果マップ
+ * @param {number} excessVdP — 超過VD% (現在の判定VD% - 許容VD%)
+ * @returns {Array} [[trunkNode, budgetVdP], ...] — 各trunkのVD予算
+ */
+function distributeVdBudget(pathTrunks, results, excessVdP) {
+  if (pathTrunks.length === 0) return [];
+
+  /* 1. 各trunkのサイズ余裕度（headroom）を計算 */
+  const info = pathTrunks.map(n => {
+    const r = results[n.id];
+    const ct = n.trunk.cableType;
+    const sizes = getCableSizes(ct);
+    const curIdx = getSizeIndex(ct, r.size, r.parallel);
+    const maxIdx = sizes.length; /* 325×2 = sizes.length */
+    const headroom = Math.max(0, maxIdx - curIdx);
+    return { node: n, r, headroom, curVdP: r.vdPercent || 0 };
+  });
+
+  const totalHeadroom = info.reduce((s, i) => s + i.headroom, 0);
+
+  /* 全trunkが最大サイズ → 配分不可 */
+  if (totalHeadroom === 0) {
+    return info.map(i => [i.node, Math.max(0.05, i.curVdP - excessVdP / info.length)]);
+  }
+
+  /* 2. サイズ余裕度で按分 */
+  let remaining = excessVdP;
+  const budgets = info.map(i => {
+    const share = excessVdP * (i.headroom / totalHeadroom);
+    const budget = Math.max(0.05, i.curVdP - share);
+    return { node: i.node, budget };
+  });
+
+  return budgets.map(b => [b.node, b.budget]);
+}
+
 /**
  * calculateAll — 全ノード一括計算
  * @param {Array} feedLinks — feedLink 接続リスト [{id, fromNodeId, toNodeId, label}]
+ * @param {boolean} vdAutoResize — VD自動再選定の有効/無効
  */
-function calculateAll(nodes, feedLinks) {
+function calculateAll(nodes, feedLinks, vdAutoResize) {
   const results = {};
   const fLinks = feedLinks || [];
 
@@ -1099,6 +1171,185 @@ function calculateAll(nodes, feedLinks) {
     r.vdJudgeLimit = allowVdP;
 
     if (!r.pathVdOK) r.ok = false;
+  }
+
+  /* 4.6: VD自動再選定（トグルON時のみ）— 累積VD超過時に経路上のtrunk/loadを再選定 */
+  if (vdAutoResize) {
+    for (let vdIter = 0; vdIter < 3; vdIter++) {
+      /* 4.6.1: VD超過ノードを収集 */
+      const failNodes = nodes.filter(n => {
+        const r = results[n.id];
+        return r && r.pathVdOK === false && n.type !== 'transformer';
+      });
+      if (failNodes.length === 0) break;
+
+      let resized = false;
+      const processedIds = new Set();
+
+      /* 4.6.2: 各超過ノードの経路を処理 */
+      for (const failNode of failNodes) {
+        const r = results[failNode.id];
+        if (!r) continue;
+
+        const allowVdP = r.pathAllowVdPercent || r.vdJudgeLimit || r.allowVdPercent;
+        const currentVdP = r.vdJudgeValue || r.cumulativeVdP || 0;
+        const excessVdP = currentVdP - allowVdP;
+        if (excessVdP <= 0) continue;
+
+        /* 経路上のtrunkを収集（上位→下位順） */
+        const ancestors = getAncestors(nodes, failNode.id).filter(a => a.type === 'trunk');
+        const pathTrunks = [];
+        for (const a of ancestors) {
+          if (!processedIds.has(a.id)) pathTrunks.push(a);
+        }
+        if (failNode.type === 'trunk' && !processedIds.has(failNode.id)) {
+          pathTrunks.push(failNode);
+        }
+
+        if (pathTrunks.length === 0 && failNode.type === 'load') {
+          /* load自体のVD超過 — load を再選定 */
+          const oldR = results[failNode.id];
+          if (oldR && !processedIds.has(failNode.id)) {
+            processedIds.add(failNode.id);
+            /* 上流trunkの累積VDからloadのVD予算を算出 */
+            const parentNode = nodes.find(nd => nd.id === failNode.parentId);
+            const parentR = parentNode ? results[parentNode.id] : null;
+            const upstreamVdP = parentR ? (parentR.trunkCumulativeVdP || parentR.cumulativeVdP || parentR.vdPercent || 0) : 0;
+            const loadBudget = Math.max(0.05, allowVdP - upstreamVdP - (r.upstreamVd ? r.upstreamVd / (r.baseV || 210) * 100 : 0));
+            const newR = runCalc(failNode.load, { maxVdP: loadBudget });
+            if (newR && (newR.size !== oldR.size || newR.parallel !== oldR.parallel)) {
+              newR.vdAutoResized = true;
+              newR.vdOriginalSize = oldR.vdOriginalSize || oldR.size;
+              newR.vdOriginalParallel = oldR.vdOriginalParallel || oldR.parallel;
+              const ampMin = getAmpacityMinSize(failNode.load.cableType, failNode.load.wiringMethod, oldR.sizingI, oldR.tempFactor, oldR.reductionFactor);
+              const stepDiff = getSizeIndex(failNode.load.cableType, newR.size, newR.parallel)
+                             - getSizeIndex(failNode.load.cableType, ampMin, 1);
+              newR.vdResizeSuggestion = stepDiff >= 3 ? 'redistribute' : 'upsize';
+              results[failNode.id] = newR;
+              resized = true;
+            }
+          }
+          continue;
+        }
+
+        /* VD予算を配分 */
+        const budgets = distributeVdBudget(pathTrunks, results, excessVdP);
+
+        /* 予算付きで各trunkを再選定 */
+        for (const [trunkNode, budget] of budgets) {
+          processedIds.add(trunkNode.id);
+          const agg = aggregateCurrents(nodes, trunkNode.id, results);
+          const oldR = results[trunkNode.id];
+          if (!oldR) continue;
+          const newR = runTrunkCalc(trunkNode.trunk, agg, { maxVdP: budget });
+          if (newR && (newR.size !== oldR.size || newR.parallel !== oldR.parallel)) {
+            newR.vdAutoResized = true;
+            newR.vdOriginalSize = oldR.vdOriginalSize || oldR.size;
+            newR.vdOriginalParallel = oldR.vdOriginalParallel || oldR.parallel;
+            /* 過剰判定: 許容電流のみの最小サイズとのステップ差 */
+            const ampMin = getAmpacityMinSize(trunkNode.trunk.cableType, trunkNode.trunk.wiringMethod,
+              oldR.sizingI, oldR.tempFactor, oldR.reductionFactor);
+            const stepDiff = getSizeIndex(trunkNode.trunk.cableType, newR.size, newR.parallel)
+                           - getSizeIndex(trunkNode.trunk.cableType, ampMin, 1);
+            newR.vdResizeSuggestion = stepDiff >= 3 ? 'redistribute' : 'upsize';
+            results[trunkNode.id] = newR;
+            resized = true;
+          }
+        }
+
+        /* failNodeがloadの場合、load自体も再選定（上流trunk VDを差し引いた予算で） */
+        if (failNode.type === 'load' && !processedIds.has(failNode.id)) {
+          processedIds.add(failNode.id);
+          const oldR = results[failNode.id];
+          if (oldR) {
+            const parentNode = nodes.find(nd => nd.id === failNode.parentId);
+            const parentR = parentNode ? results[parentNode.id] : null;
+            const upstreamVdP = parentR ? (parentR.trunkCumulativeVdP || parentR.cumulativeVdP || parentR.vdPercent || 0) : 0;
+            const loadBudget = Math.max(0.05, allowVdP - upstreamVdP - (r.upstreamVd ? r.upstreamVd / (r.baseV || 210) * 100 : 0));
+            const newR = runCalc(failNode.load, { maxVdP: loadBudget });
+            if (newR && (newR.size !== oldR.size || newR.parallel !== oldR.parallel)) {
+              newR.vdAutoResized = true;
+              newR.vdOriginalSize = oldR.vdOriginalSize || oldR.size;
+              newR.vdOriginalParallel = oldR.vdOriginalParallel || oldR.parallel;
+              const ampMin = getAmpacityMinSize(failNode.load.cableType, failNode.load.wiringMethod, oldR.sizingI, oldR.tempFactor, oldR.reductionFactor);
+              const stepDiff = getSizeIndex(failNode.load.cableType, newR.size, newR.parallel)
+                             - getSizeIndex(failNode.load.cableType, ampMin, 1);
+              newR.vdResizeSuggestion = stepDiff >= 3 ? 'redistribute' : 'upsize';
+              results[failNode.id] = newR;
+              resized = true;
+            }
+          }
+        }
+      }
+
+      if (!resized) break;
+
+      /* 4.6.3: 累積VD再計算 + feedLink VD伝搬 + 再判定 */
+      for (const root of roots) {
+        calcCumulativeVd(nodes, root.id, 0, results);
+      }
+      /* feedLink 上流VD伝搬を再実行 */
+      for (const fl of fLinks) {
+        const fromR = results[fl.fromNodeId];
+        const toNode = nodes.find(n => n.id === fl.toNodeId);
+        if (!fromR || !toNode || fromR.cumulativeVd == null) continue;
+        const upstreamVd = fromR.cumulativeVd;
+        const fromPathLen = calcPathLength(nodes, fl.fromNodeId);
+        const addUpstreamVd = (nId) => {
+          const r2 = results[nId];
+          if (r2) {
+            r2.cumulativeVd = rd((r2.cumulativeVd || 0) + upstreamVd);
+            const bV2 = r2.baseV || (r2.allowVdPercent && r2.allowVd ? r2.allowVd / r2.allowVdPercent * 100 : 0);
+            r2.cumulativeVdP = bV2 > 0 ? rd(r2.cumulativeVd / bV2 * 100) : 0;
+            r2.upstreamVd = rd(upstreamVd);
+            r2.upstreamPathLength = rd(fromPathLen, 1);
+          }
+          for (const child of getChildren(nodes, nId)) addUpstreamVd(child.id);
+        };
+        addUpstreamVd(fl.toNodeId);
+      }
+      /* 亘長ベース電圧降下判定を再実行 */
+      for (const n of nodes) {
+        if (n.type === 'transformer') continue;
+        const r = results[n.id];
+        if (!r) continue;
+        const cfg = n.type === 'trunk' ? n.trunk : n.load;
+        const sup = cfg.supplyType || '低圧受電';
+        let totalPath = calcPathLength(nodes, n.id);
+        if (r.upstreamPathLength) totalPath += r.upstreamPathLength;
+        const baseV = r.baseV || (r.allowVdPercent && r.allowVd ? r.allowVd / r.allowVdPercent * 100 : 0);
+        const reAllowVdP = getAllowVdP(totalPath, sup);
+        r.totalPathLength = rd(totalPath, 1);
+        r.pathAllowVdPercent = reAllowVdP;
+        r.pathAllowVd = baseV > 0 ? rd(baseV * reAllowVdP / 100) : 0;
+        if (totalPath <= 60) {
+          if (n.type === 'trunk') {
+            const trunkCumVd = calcTrunkCumulativeVd(nodes, n.id, results);
+            const effTrunkVd = trunkCumVd + (r.upstreamVd || 0);
+            const trunkCumVdP = baseV > 0 ? effTrunkVd / baseV * 100 : 0;
+            r.trunkCumulativeVd = rd(effTrunkVd);
+            r.trunkCumulativeVdP = rd(trunkCumVdP);
+            r.pathVdOK = trunkCumVdP <= reAllowVdP;
+            r.vdJudgeType = 'trunk';
+            r.vdJudgeValue = rd(trunkCumVdP);
+          } else {
+            r.pathVdOK = (r.vdPercent || 0) <= reAllowVdP;
+            r.vdJudgeType = 'branch';
+            r.vdJudgeValue = r.vdPercent;
+          }
+        } else {
+          r.pathVdOK = (r.cumulativeVdP || 0) <= reAllowVdP;
+          r.vdJudgeType = 'cumulative';
+          r.vdJudgeValue = r.cumulativeVdP;
+        }
+        r.vdJudgeLimit = reAllowVdP;
+        if (!r.pathVdOK) r.ok = false;
+        else if (r.vdAutoResized || r.vdBudgetApplied) {
+          /* VD再選定後にOKになった場合、okフラグを再評価 */
+          r.ok = (r.ampacityOK !== false) && (r.vdOK !== false) && (r.protOK !== false);
+        }
+      }
+    }
   }
 
   /* 5. トップダウン: 短絡電流 */
@@ -4280,9 +4531,6 @@ function TreeTable({ nodes, allResults, selectedId, selectedIds, onSelect, onDel
           <td style={{ padding: '6px 4px', fontSize: 12, textAlign: 'right' }}>
             {r && r.dI != null ? `${r.dI}A` : r && r.In != null ? `${rd(r.In)}A` : '-'}
           </td>
-          <td style={{ padding: '6px 4px', fontSize: 12, textAlign: 'right' }}>
-            {isTr ? '-' : `${(isTrunk ? node.trunk?.cableLength : node.load?.cableLength) || '-'}m`}
-          </td>
           <td style={{ padding: '6px 4px', fontSize: 11, textAlign: 'center' }}>
             {(() => {
               if (isTr) return '-';
@@ -4296,8 +4544,20 @@ function TreeTable({ nodes, allResults, selectedId, selectedIds, onSelect, onDel
               return parts.length > 0 ? parts.join(' ') : '-';
             })()}
           </td>
+          <td style={{ padding: '6px 4px', fontSize: 12, textAlign: 'right' }}>
+            {isTr ? '-' : `${(isTrunk ? node.trunk?.cableLength : node.load?.cableLength) || '-'}m`}
+          </td>
           <td style={{ padding: '6px 4px', fontSize: 12 }}>
-            {r && r.size ? `${cType} ${r.size}${r.parallel > 1 ? '×' + r.parallel : ''}` : '-'}
+            {r && r.size ? (
+              <React.Fragment>
+                <span>{cType} {r.size}{r.parallel > 1 ? '×' + r.parallel : ''}</span>
+                {r.vdAutoResized && (
+                  <div style={{ fontSize: 9, color: '#888' }}>
+                    電流: {r.vdOriginalSize}{r.vdOriginalParallel > 1 ? '×' + r.vdOriginalParallel : ''}
+                  </div>
+                )}
+              </React.Fragment>
+            ) : '-'}
           </td>
           <td style={{ padding: '6px 4px', fontSize: 12, textAlign: 'right' }}>
             {r && r.mccbAT ? `${r.mccbAT}` : '-'}
@@ -4316,6 +4576,11 @@ function TreeTable({ nodes, allResults, selectedId, selectedIds, onSelect, onDel
                     上流{r.upstreamVd}V含
                   </div>
                 )}
+                {r.vdBudgetApplied && (
+                  <div style={{ fontSize: 9, color: '#1976d2' }}>
+                    予算{r.vdBudget}%
+                  </div>
+                )}
               </React.Fragment>
             ) : '-'}
           </td>
@@ -4331,6 +4596,16 @@ function TreeTable({ nodes, allResults, selectedId, selectedIds, onSelect, onDel
                   <div style={{ fontSize: 9, color: '#f44336', marginTop: 1 }}>
                     {r.vdJudgeType === 'trunk' ? '幹線累積' : r.vdJudgeType === 'branch' ? '分岐' : '累積'}
                     {r.vdJudgeValue}%{'>'}{r.vdJudgeLimit}%
+                  </div>
+                )}
+                {r.vdAutoResized && r.pathVdOK !== false && (
+                  <div style={{ fontSize: 9, color: '#1976d2', marginTop: 1 }}>
+                    VD再選定 {r.vdOriginalSize}→{r.size}
+                  </div>
+                )}
+                {r.vdResizeSuggestion === 'redistribute' && (
+                  <div style={{ fontSize: 9, color: '#e65100', marginTop: 1 }}>
+                    接続見直し推奨
                   </div>
                 )}
               </React.Fragment>
@@ -4434,8 +4709,8 @@ function TreeTable({ nodes, allResults, selectedId, selectedIds, onSelect, onDel
             <th style={{ padding: '6px 4px', textAlign: 'left', fontSize: 12 }}>名称</th>
             <th style={{ padding: '6px 4px', textAlign: 'left', fontSize: 12 }}>方式/電圧</th>
             <th style={{ padding: '6px 4px', textAlign: 'right', fontSize: 12 }}>設計I</th>
-            <th style={{ padding: '6px 4px', textAlign: 'right', fontSize: 12 }}>こう長</th>
             <th style={{ padding: '6px 4px', textAlign: 'center', fontSize: 12 }}>補正</th>
+            <th style={{ padding: '6px 4px', textAlign: 'right', fontSize: 12 }}>こう長</th>
             <th style={{ padding: '6px 4px', textAlign: 'left', fontSize: 12 }}>ケーブル</th>
             <th style={{ padding: '6px 4px', textAlign: 'right', fontSize: 12 }}>AT</th>
             <th style={{ padding: '6px 4px', textAlign: 'right', fontSize: 12 }}>e [V]</th>
@@ -5478,6 +5753,7 @@ function App() {
   const [groups, setGroups] = React.useState([]);
   const [crossLinks, setCrossLinks] = React.useState([]);
   const [feedLinks, setFeedLinks] = React.useState([]); /* {id, fromNodeId (load/trunk 4層目), toNodeId (trunk 1層目), label} */
+  const [vdAutoResize, setVdAutoResize] = React.useState(true); /* VD自動再選定トグル */
 
   /* --- 計算結果（フォームプレビュー用） --- */
   const result = React.useMemo(() => {
@@ -5488,8 +5764,8 @@ function App() {
   /* --- 全ノード一括計算 --- */
   const allResults = React.useMemo(() => {
     if (nodes.length === 0) return {};
-    return calculateAll(nodes, feedLinks);
-  }, [nodes, feedLinks]);
+    return calculateAll(nodes, feedLinks, vdAutoResize);
+  }, [nodes, feedLinks, vdAutoResize]);
 
   /* --- M2: canvas 座標が未設定のノードに自動配置を適用 --- */
   React.useEffect(() => {
@@ -6121,6 +6397,10 @@ function App() {
             groups={groups} onAll={() => handlePDF()} onGroup={(gid) => handlePDF(gid)} />
           <OutputDropdown label="系統図" disabled={nodes.length === 0}
             groups={groups} onAll={() => handleDiagramOutput()} onGroup={(gid) => handleDiagramOutput(gid)} />
+          <label style={{ display: 'flex', alignItems: 'center', gap: 4, fontSize: 12, color: '#fff', marginLeft: 8, cursor: 'pointer', whiteSpace: 'nowrap' }}>
+            <input type="checkbox" checked={vdAutoResize} onChange={e => setVdAutoResize(e.target.checked)} style={{ cursor: 'pointer' }} />
+            VD自動再選定
+          </label>
         </div>
       </header>
 
