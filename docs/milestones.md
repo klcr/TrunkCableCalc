@@ -251,3 +251,43 @@ UX 設計思想: `docs/ux-protection-design.md`
 - [x] M2-7-4: 幹線情報の系統図モジュール内整理（ModuleTrunk/ModuleLoadNode のボックス拡大、情報を枠内に整理配置）
 - [x] M2-7-5: 一括取込テンプレートコピーの強化（ヘッダー+入力ルール+選択肢一覧の複数行テンプレート、テンプレート行自動スキップ）
 - [x] M2-7-6: 系統図のページズーム無効化（ネイティブ wheel リスナー passive:false + touchAction:none でブラウザズーム抑止）
+
+---
+
+## P7: 変圧器検討機能
+
+変圧器の容量選定・不平衡率・電圧変動率・損失/効率・励磁突入電流を一括検討する機能。
+仕様: §19-6〜§19-10
+
+### P7-1: データ・仕様整備
+
+- [x] data/transformer-ratings.json に損失データ（Wi/Wc）追加（JIS C 4304/4306 トップランナー基準）
+- [x] docs/spec-cable-calc.md に §19-6〜19-10 追加
+- [x] docs/milestones.md に P7 マイルストーン追加
+
+### P7-2: データモデル拡張
+
+- [ ] DEFAULT_PARAMS に `phase` フィールド追加（接続相: 自動/R-S/S-T/T-R/R-N/S-N/T-N）
+- [ ] DEFAULT_TR_PARAMS に損失・需要率フィールド追加（wi_W, wc_W, lossAuto, diversityFactor, annualLoadFactor）
+- [ ] Export/Import 後方互換性（旧スキーマ読込時のデフォルト値設定）
+
+### P7-3: 計算エンジン
+
+- [ ] convertToKVA: 設計電流 [A] → kVA 変換ヘルパー
+- [ ] mapToLinePhase: 相電圧接続→線間相変換
+- [ ] getAutoLoss: 損失データ自動取得
+- [ ] calcComposedPF: 加重平均力率算出
+- [ ] calcTransformerAnalysis: 統合検討関数（容量・不平衡・電圧変動・損失・突入）
+- [ ] calculateAll に step 3.5（変圧器検討）統合
+
+### P7-4: UI
+
+- [ ] LoadForm に「接続相」フィールド追加（単相負荷のみ表示）
+- [ ] TransformerForm に「総合需要率」「無負荷損」「負荷損」フィールド追加（Auto チェックボックス付き）
+- [ ] TransformerResultPanel に容量検討カード追加
+- [ ] TransformerResultPanel に不平衡率カード追加（相別バーチャート）
+- [ ] TransformerResultPanel に電圧変動率カード追加
+- [ ] TransformerResultPanel に損失・効率カード追加
+- [ ] TransformerResultPanel に励磁突入電流カード追加
+- [ ] getTransformerHints 拡張（容量超過/過剰、不平衡、電圧変動率の警告）
+- [ ] 一括取込（BULK_COLUMNS）に接続相列追加
