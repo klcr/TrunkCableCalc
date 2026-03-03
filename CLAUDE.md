@@ -113,7 +113,7 @@ index.html（ビルド成果物）
 | `temp-correction.json` | `TC` | 温度補正係数（気中 / 地中） | 内線規程 |
 | `mccb-ratings.json` | `MCCB_AT` | MCCB 定格電流の選択肢 [A] | JIS C 8201-2-1 |
 | `reduction-presets.json` | `RED_PRE` | 多条低減率プリセット | 内線規程 |
-| `transformer-ratings.json` | `TR_RATINGS` | 変圧器%Z・X/R比（三相油入/単相油入/モールド） | 河村電器産業 / 三菱電機 / JIS C 4304 / JEC 2200 |
+| `transformer-ratings.json` | `TR_RATINGS` | 変圧器%Z・X/R比・損失（三相油入/単相油入/モールド） | 河村電器産業 / 三菱電機 / JIS C 4304 / JIS C 4306 / JEC 2200 |
 | `cable-capacitance.json` | `C_CABLE` | ケーブル対地静電容量 [μF/km]（将来用） | 技資第 103 号 A |
 | `zero-sequence.json` | `Z_ZERO` | 零相インピーダンス推定係数・変圧器結線別乗数 | IEC 60909 / CENELEC CLC/TR 50480 |
 | `short-time-withstand.json` | `WITHSTAND` | 短時間耐電流 K 定数・I²t 許容値 | JCS 0168-1:2016 |

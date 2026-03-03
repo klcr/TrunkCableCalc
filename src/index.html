@@ -550,6 +550,219 @@ function calcTransformer(tr) {
   return { Rs, Xs, Zs, In, Isc3, pctZ: tr.pctZ, capacity_kVA: tr.capacity_kVA, threePhase };
 }
 
+/* === TRANSFORMER ANALYSIS HELPERS (§19-6〜19-10) === */
+
+/** convertToKVA — 設計電流 [A] → kVA 変換 (§19-6a) */
+function convertToKVA(result, loadParams) {
+  if (!result) return 0;
+  const dI = result.dI || 0;
+  const v = loadParams.voltage || 200;
+  const sys = loadParams.system || '三相3線式';
+  if (sys.includes('三相')) return dI * Math.sqrt(3) * v / 1000;
+  return dI * v / 1000;
+}
+
+/** mapToLinePhase — 相電圧接続→線間相変換 (§19-7b) */
+function mapToLinePhase(phase) {
+  const map = {
+    'R-S': [['R-S', 1.0]],
+    'S-T': [['S-T', 1.0]],
+    'T-R': [['T-R', 1.0]],
+    'R-N': [['R-S', 0.5], ['T-R', 0.5]],
+    'S-N': [['R-S', 0.5], ['S-T', 0.5]],
+    'T-N': [['S-T', 0.5], ['T-R', 0.5]]
+  };
+  return map[phase] || [['R-S', 1/3], ['S-T', 1/3], ['T-R', 1/3]];
+}
+
+/** getAutoLoss — 損失データ自動取得 (§19-9a) */
+function getAutoLoss(tr) {
+  const key = String(tr.capacity_kVA);
+  const typeMap = { '三相油入': 'three_phase_oil', '単相油入': 'single_phase_oil', 'モールド': 'mold' };
+  const d = TR_RATINGS[typeMap[tr.trType]]?.data[key];
+  return { wi_W: d?.wi_W || 0, wc_W: d?.wc_W || 0 };
+}
+
+/** calcComposedPF — 加重平均力率算出 (§19-8) */
+function calcComposedPF(nodes, trNodeId) {
+  const allLoads = getDescendants(nodes, trNodeId).filter(n => n.type === 'load');
+  let totalP = 0, totalQ = 0;
+  for (const l of allLoads) {
+    const p = l.load;
+    const df = (p.demandFactor || 100) / 100;
+    const pf = p.powerFactor || 0.85;
+    const sinPF = Math.sqrt(1 - pf * pf);
+    let va;
+    if (p.unit === 'kW') {
+      const kw = (p.capacity || 0) * df;
+      totalP += kw;
+      totalQ += kw * sinPF / pf;
+    } else if (p.unit === 'kVA') {
+      const kva = (p.capacity || 0) * df;
+      totalP += kva * pf;
+      totalQ += kva * sinPF;
+    } else {
+      const V = p.voltage || 210;
+      const three = (p.system || '').includes('三相');
+      va = three ? (p.capacity || 0) * Math.sqrt(3) * V * df : (p.capacity || 0) * V * df;
+      totalP += va * pf / 1000;
+      totalQ += va * sinPF / 1000;
+    }
+  }
+  const S = Math.sqrt(totalP * totalP + totalQ * totalQ);
+  return S > 0 ? totalP / S : 0.85;
+}
+
+/**
+ * calcTransformerAnalysis — 変圧器検討統合関数 (§19-6〜19-10)
+ */
+function calcTransformerAnalysis(tr, nodes, nodeId, allResults) {
+  const analysis = {};
+  const allLoads = getDescendants(nodes, nodeId).filter(n => n.type === 'load');
+  const threePhase = tr.trType !== '単相油入';
+  const typeMap = { '三相油入': 'three_phase_oil', '単相油入': 'single_phase_oil', 'モールド': 'mold' };
+  const trTypeKey = typeMap[tr.trType] || 'three_phase_oil';
+
+  /* === A. 容量検討 (§19-6) === */
+  let sumMotorKVA = 0, sumGeneralKVA = 0;
+  for (const l of allLoads) {
+    const r = allResults[l.id];
+    const kva = convertToKVA(r, l.load);
+    if (l.load.circuitType === '電動機') sumMotorKVA += kva;
+    else sumGeneralKVA += kva;
+  }
+  const df = (tr.diversityFactor || 100) / 100;
+  const totalDemandKVA = (sumMotorKVA + sumGeneralKVA) * df;
+  const caps = TR_RATINGS[trTypeKey]?.capacities_kVA || [];
+  const recommendedKVA = caps.find(c => c >= totalDemandKVA) || (caps.length > 0 ? caps[caps.length - 1] : tr.capacity_kVA);
+  const utilization = tr.capacity_kVA > 0 ? totalDemandKVA / tr.capacity_kVA * 100 : 0;
+
+  analysis.capacity = {
+    sumMotorKVA: rd(sumMotorKVA, 1),
+    sumGeneralKVA: rd(sumGeneralKVA, 1),
+    totalDemandKVA: rd(totalDemandKVA, 1),
+    ratedKVA: tr.capacity_kVA,
+    utilization: rd(utilization, 1),
+    recommendedKVA,
+    ok: totalDemandKVA <= tr.capacity_kVA
+  };
+
+  /* === B. 不平衡率検討 (§19-7) === */
+  if (threePhase) {
+    const phaseLoads = { 'R-S': 0, 'S-T': 0, 'T-R': 0 };
+    const unassigned = [];
+    let singlePhaseTotal = 0;
+
+    for (const l of allLoads) {
+      const p = l.load;
+      const r = allResults[l.id];
+      const kva = convertToKVA(r, p);
+
+      if ((p.system || '').includes('三相')) {
+        phaseLoads['R-S'] += kva / 3;
+        phaseLoads['S-T'] += kva / 3;
+        phaseLoads['T-R'] += kva / 3;
+      } else {
+        singlePhaseTotal += kva;
+        if (p.phase && p.phase !== '自動') {
+          const targets = mapToLinePhase(p.phase);
+          for (const [ph, ratio] of targets) phaseLoads[ph] += kva * ratio;
+        } else {
+          unassigned.push({ name: p.loadName || p.trunkName || '(無名)', kva: rd(kva, 1) });
+        }
+      }
+    }
+
+    const vals = Object.values(phaseLoads);
+    const maxPhase = Math.max(...vals);
+    const minPhase = Math.min(...vals);
+    const unbalanceRate = tr.capacity_kVA > 0 ? (maxPhase - minPhase) / tr.capacity_kVA * 100 : 0;
+    const singlePhaseLimit = tr.capacity_kVA / 3;
+
+    analysis.unbalance = {
+      phaseLoads: { 'R-S': rd(phaseLoads['R-S'], 1), 'S-T': rd(phaseLoads['S-T'], 1), 'T-R': rd(phaseLoads['T-R'], 1) },
+      maxPhase: rd(maxPhase, 1), minPhase: rd(minPhase, 1),
+      unbalanceRate: rd(unbalanceRate, 1),
+      unassigned,
+      ok: unbalanceRate <= 30,
+      singlePhaseTotal: rd(singlePhaseTotal, 1),
+      singlePhaseLimit: rd(singlePhaseLimit, 1),
+      singlePhaseOK: singlePhaseTotal <= singlePhaseLimit
+    };
+  }
+
+  /* === C. 電圧変動率 (§19-8) === */
+  const loadRatio = tr.capacity_kVA > 0 ? totalDemandKVA / tr.capacity_kVA : 0;
+  let pctR, pctX;
+  if (tr.xrRatio != null && tr.xrRatio > 0) {
+    pctR = tr.pctZ / Math.sqrt(1 + tr.xrRatio * tr.xrRatio);
+    pctX = pctR * tr.xrRatio;
+  } else {
+    pctR = tr.pctZ;
+    pctX = 0;
+  }
+  const cosT = calcComposedPF(nodes, nodeId);
+  const sinT = Math.sqrt(Math.max(0, 1 - cosT * cosT));
+  const p_vr = pctR * loadRatio;
+  const q_vr = pctX * loadRatio;
+  const epsilon = (p_vr * cosT + q_vr * sinT) + Math.pow(p_vr * sinT - q_vr * cosT, 2) / 200;
+
+  analysis.voltageRegulation = {
+    epsilon: rd(epsilon, 2),
+    p: rd(p_vr, 3), q: rd(q_vr, 3),
+    cosTheta: rd(cosT, 3),
+    secondaryVoltageAtLoad: rd(tr.secondaryV * (1 - epsilon / 100), 1),
+    ok: epsilon <= 5.0
+  };
+
+  /* === D. 損失計算 (§19-9) === */
+  const autoLoss = getAutoLoss(tr);
+  const wi = (tr.lossAuto !== false) ? autoLoss.wi_W : (tr.wi_W || 0);
+  const wc = (tr.lossAuto !== false) ? autoLoss.wc_W : (tr.wc_W || 0);
+  const pc = wc * loadRatio * loadRatio;
+  const totalLoss = wi + pc;
+  const outputW = totalDemandKVA * 1000 * cosT;
+  const efficiency = outputW > 0 ? outputW / (outputW + totalLoss) * 100 : 0;
+  const optimalLoadRatio = wc > 0 ? Math.sqrt(wi / wc) * 100 : 0;
+
+  let annualLossKWh = null;
+  if (tr.annualLoadFactor != null && tr.annualLoadFactor > 0) {
+    const alf = tr.annualLoadFactor / 100;
+    annualLossKWh = (wi * 8760 + wc * alf * alf * 8760) / 1000;
+  }
+
+  analysis.losses = {
+    wi, wc,
+    ironLoss: wi,
+    copperLoss: rd(pc, 0),
+    totalLoss: rd(totalLoss, 0),
+    efficiency: rd(efficiency, 1),
+    optimalLoadRatio: rd(optimalLoadRatio, 1),
+    loadRatio: rd(loadRatio * 100, 1),
+    annualLossKWh: annualLossKWh != null ? rd(annualLossKWh, 0) : null
+  };
+
+  /* === E. 励磁突入電流 (§19-10) === */
+  const In = threePhase
+    ? tr.capacity_kVA * 1000 / (Math.sqrt(3) * tr.secondaryV)
+    : tr.capacity_kVA * 1000 / tr.secondaryV;
+  const inrushMultiplier = tr.trType === 'モールド' ? 10 : 7;
+  const inrushPeak = In * inrushMultiplier;
+  const inrushDuration_ms = tr.trType === 'モールド' ? 100 : 200;
+
+  analysis.inrush = {
+    In: rd(In, 1),
+    multiplier: inrushMultiplier,
+    peakCurrent: rd(inrushPeak, 0),
+    duration_ms: inrushDuration_ms,
+    note: tr.trType === 'モールド'
+      ? 'モールド変圧器: 8〜12倍 (代表値 10倍)'
+      : '油入変圧器: 6〜8倍 (代表値 7倍)'
+  };
+
+  return analysis;
+}
+
 /**
  * aggregateCurrents — ボトムアップ電流合算 (§9-3)
  */
@@ -1102,6 +1315,13 @@ function calculateAll(nodes, feedLinks, vdAutoResize) {
   /* 3. transformer ノード */
   for (const n of nodes) {
     if (n.type === 'transformer') results[n.id] = calcTransformer(n.transformer);
+  }
+
+  /* 3.5 変圧器検討: 容量・不平衡・電圧変動・損失・突入 (§19-6〜19-10) */
+  for (const n of nodes) {
+    if (n.type === 'transformer') {
+      results[n.id].analysis = calcTransformerAnalysis(n.transformer, nodes, n.id, results);
+    }
   }
 
   /* 4. トップダウン: 累積電圧降下 */
@@ -2694,7 +2914,8 @@ const DEFAULT_PARAMS = {
   demandFactor: 100, spareFactor: 0, cableLength: 30,
   cableType: 'CVT', wiringMethod: 'ケーブルラック配線',
   ambientTemp: 40, reductionPreset: '1段 S=d 7列以上', reductionFactor: 0.70,
-  hasELCB: false, elcbSensitivity_mA: 30, groundingMethod: 'TT', groundResistance_ohm: 100
+  hasELCB: false, elcbSensitivity_mA: 30, groundingMethod: 'TT', groundResistance_ohm: 100,
+  phase: '自動'
 };
 
 /* --- 変圧器デフォルト (§19) --- */
@@ -2702,6 +2923,8 @@ const DEFAULT_TR_PARAMS = {
   name: 'TR-1', trType: '三相油入', capacity_kVA: 500,
   primaryV: 6600, secondaryV: 210,
   pctZ: 4.00, xrRatio: 2.98, connection: 'Δ-Y', pctZAuto: true,
+  wi_W: null, wc_W: null, lossAuto: true,
+  diversityFactor: 100, annualLoadFactor: null,
   hvSystem: { /* P4-7: reserved for M2-3 (§19-5) */
     cableType: null,            /* 'CV-3C' | 'CVT' | null */
     cableSize_mm2: null,        /* number | null */
@@ -2744,6 +2967,7 @@ const BULK_COLUMNS = [
   { key: 'mccbATOverride',  label: 'MCCB AT',    required: false },
   { key: 'trName',          label: '変圧器名',   required: false },
   { key: 'feedSource',      label: '給電元',     required: false },
+  { key: 'phase',           label: '接続相',     required: false },
 ];
 
 const BULK_HEADER_ROW = BULK_COLUMNS.map(c => c.label).join('\t');
@@ -2751,12 +2975,12 @@ const BULK_HEADER_ROW = BULK_COLUMNS.map(c => c.label).join('\t');
 /* 一括取込テンプレート: ヘッダー + 入力ルール + 入力例 + 選択肢一覧 */
 const BULK_TEMPLATE_ROWS = [
   BULK_COLUMNS.map(c => c.label).join('\t'),
-  ['(必須/任意)', '(任意)', '(任意)', '(選択式)', '(数値 V)', '(必須/数値>0)', '(選択式)', '(選択式)', '(0.10~1.00)', '(0.10~1.00)', '(1~100 %)', '(0~100 %)', '(数値 m)', '(選択式)', '(選択式)', '(選択式)', '(20~50 ℃)', '(0.10~1.00)', '(自動/数値AT)', '(任意)', '(負荷名称を入力)'].join('\t'),
-  ['例:P-1', '例:P-1A', '例:空調機', '三相3線式', '200', '15', 'kW', '電動機', '0.85', '0.90', '100', '0', '30', '60Hz', 'CVT', 'ケーブルラック配線', '40', '0.70', '自動', 'TR-1', 'UPS-1'].join('\t'),
-  ['', '', '', '単相2線式', '100/105/200/210', '', 'kVA', '一般', '', '', '', '', '', '50Hz', 'CVD', '配管配線', '', '', '', '', ''].join('\t'),
-  ['', '', '', '単相3線式', '200/210/400/415', '', 'A', '', '', '', '', '', '', '', 'CV-3C', '直埋布設', '', '', '', '', ''].join('\t'),
-  ['', '', '', '三相4線式', '420/440', '', '', '', '', '', '', '', '', '', 'CV-2C', '管路布設', '', '', '', '', ''].join('\t'),
-  ['※空欄はデフォルト値適用', '', '', '', '', '', '', '', 'kW時は必須', '電動機のみ', '', '', '', '', '', '', '', '', '', '', ''].join('\t'),
+  ['(必須/任意)', '(任意)', '(任意)', '(選択式)', '(数値 V)', '(必須/数値>0)', '(選択式)', '(選択式)', '(0.10~1.00)', '(0.10~1.00)', '(1~100 %)', '(0~100 %)', '(数値 m)', '(選択式)', '(選択式)', '(選択式)', '(20~50 ℃)', '(0.10~1.00)', '(自動/数値AT)', '(任意)', '(負荷名称を入力)', '(選択式)'].join('\t'),
+  ['例:P-1', '例:P-1A', '例:空調機', '三相3線式', '200', '15', 'kW', '電動機', '0.85', '0.90', '100', '0', '30', '60Hz', 'CVT', 'ケーブルラック配線', '40', '0.70', '自動', 'TR-1', 'UPS-1', '自動'].join('\t'),
+  ['', '', '', '単相2線式', '100/105/200/210', '', 'kVA', '一般', '', '', '', '', '', '50Hz', 'CVD', '配管配線', '', '', '', '', '', 'R-S/S-T/T-R'].join('\t'),
+  ['', '', '', '単相3線式', '200/210/400/415', '', 'A', '', '', '', '', '', '', '', 'CV-3C', '直埋布設', '', '', '', '', '', 'R-N/S-N/T-N'].join('\t'),
+  ['', '', '', '三相4線式', '420/440', '', '', '', '', '', '', '', '', '', 'CV-2C', '管路布設', '', '', '', '', '', ''].join('\t'),
+  ['※空欄はデフォルト値適用', '', '', '', '', '', '', '', 'kW時は必須', '電動機のみ', '', '', '', '', '', '', '', '', '', '', '', '単相負荷のみ'].join('\t'),
 ].join('\n');
 
 const VALID_SYSTEMS = ['単相2線式', '単相3線式', '三相3線式', '三相4線式'];
@@ -2899,6 +3123,13 @@ function parseBulkRow(cells) {
 
   /* 給電元（負荷名称でマッチ） */
   const feedSource = get(20) || '';
+
+  /* 接続相 (§19-7) */
+  if (get(21)) {
+    const validPhases = ['自動', 'R-S', 'S-T', 'T-R', 'R-N', 'S-N', 'T-N'];
+    if (validPhases.includes(get(21))) d.phase = get(21);
+    else errors.push('接続相が不正: ' + get(21));
+  }
 
   return { params: d, errors, trName, feedSource, branchName };
 }
@@ -3731,13 +3962,38 @@ function getHints(r, params) {
   return hints;
 }
 
-/* --- getTransformerHints 変圧器ガイダンス (§11-4) --- */
-function getTransformerHints(r, utilization) {
+/* --- getTransformerHints 変圧器ガイダンス (§11-4, §19-6〜19-10) --- */
+function getTransformerHints(r, utilization, analysis) {
   const hints = [];
-  if (utilization >= 80) hints.push({ id: 'trHigh', section: 'util', type: 'warn',
-    text: '変圧器の利用率が' + Math.round(utilization) + '%です。\n将来の負荷増設余地が限られます。増設予定がある場合は上位容量を検討してください。' });
-  if (utilization > 0 && utilization <= 30) hints.push({ id: 'trLow', section: 'util', type: 'warn',
-    text: '変圧器の利用率が' + Math.round(utilization) + '%と低く、設備投資効率の面で過剰な可能性があります。' });
+  const a = analysis;
+
+  /* 容量検討ヒント */
+  if (a?.capacity) {
+    if (!a.capacity.ok) hints.push({ id: 'trOverload', section: 'capacity', type: 'error',
+      text: '需要合計 ' + a.capacity.totalDemandKVA + ' kVA が定格容量 ' + a.capacity.ratedKVA + ' kVA を超過しています。\n推奨: ' + a.capacity.recommendedKVA + ' kVA 以上' });
+    else if (utilization >= 80) hints.push({ id: 'trHigh', section: 'capacity', type: 'warn',
+      text: '利用率 ' + Math.round(utilization) + '% — 将来の負荷増設余地が限られます。' });
+    else if (utilization > 0 && utilization <= 30) hints.push({ id: 'trLow', section: 'capacity', type: 'warn',
+      text: '利用率 ' + Math.round(utilization) + '% — 過剰設備の可能性。推奨容量: ' + a.capacity.recommendedKVA + ' kVA' });
+  }
+
+  /* 不平衡率ヒント */
+  if (a?.unbalance) {
+    if (!a.unbalance.ok) hints.push({ id: 'unbalNG', section: 'unbalance', type: 'warn',
+      text: '不平衡率 ' + a.unbalance.unbalanceRate + '% が基準値 30% を超えています。\n相割り当ての見直しを検討してください。' });
+    if (!a.unbalance.singlePhaseOK) hints.push({ id: 'singleNG', section: 'unbalance', type: 'warn',
+      text: '単相負荷合計 ' + a.unbalance.singlePhaseTotal + ' kVA が上限 ' + a.unbalance.singlePhaseLimit + ' kVA（定格/3）を超えています。' });
+    if (a.unbalance.unassigned.length > 0) hints.push({ id: 'unassign', section: 'unbalance', type: 'info',
+      text: a.unbalance.unassigned.length + ' 件の単相負荷に接続相が未指定です。\n不平衡率を正確に評価するため、負荷フォームで接続相を設定してください。' });
+  }
+
+  /* 電圧変動率ヒント */
+  if (a?.voltageRegulation && !a.voltageRegulation.ok) {
+    hints.push({ id: 'vrNG', section: 'voltageReg', type: 'warn',
+      text: '電圧変動率 ε = ' + a.voltageRegulation.epsilon + '% が一般許容値 5% を超えています。\n負荷時の電圧低下が大きいため、上位容量への変更を検討してください。' });
+  }
+
+  /* 接地設計ヒント */
   if (r.groundFault) hints.push({ id: 'igInfo', section: 'ground', type: 'info',
     text: 'B種接地抵抗の上限は一線地絡電流 Ig とVCB遮断時間で決まります。\n'
       + '0.5秒以内: Rb ≤ 150/Ig、1.0秒以内: Rb ≤ 600/Ig\n'
@@ -4004,29 +4260,24 @@ function ResultPanel({ result, params }) {
   );
 }
 
-/* --- TransformerResultPanel 変圧器結果パネル (§19-3) --- */
+/* --- TransformerResultPanel 変圧器結果パネル (§19-3, §19-6〜19-10) --- */
 function TransformerResultPanel({ result, nodes, nodeId, allResults }) {
   if (!result) return null;
   const r = result;
+  const a = r.analysis;
   const cardStyle = { background: '#fff', border: '1px solid #e0e0e0', borderRadius: 8, padding: 16, marginBottom: 16 };
   const dtStyle = { fontSize: 12, color: '#888', marginBottom: 2 };
   const ddStyle = { fontSize: 18, fontWeight: 700, marginBottom: 8 };
   const detailRow = { display: 'flex', justifyContent: 'space-between', fontSize: 13, padding: '3px 0', borderBottom: '1px solid #f0f0f0' };
+  const secTitle = (text) => ({ fontSize: 13, fontWeight: 700, marginBottom: 8, color: '#1976d2' });
 
-  let utilization = 0;
-  if (nodeId) {
-    const allLoads = getDescendants(nodes, nodeId).filter(n => n.type === 'load');
-    let totalKW = 0;
-    for (const l of allLoads) {
-      totalKW += (l.load.capacity || 0) * (l.load.demandFactor || 100) / 100;
-    }
-    utilization = r.capacity_kVA > 0 ? totalKW / r.capacity_kVA * 100 : 0;
-  }
-  const trHints = getTransformerHints(r, utilization);
+  const utilization = a?.capacity?.utilization || 0;
+  const trHints = getTransformerHints(r, utilization, a);
   const hFor = (sec) => trHints.filter(h => h.section === sec).map(h => <Hint key={h.id} type={h.type} text={h.text} />);
 
   return (
     <div>
+      {/* カード1: 基本情報 */}
       <div style={cardStyle}>
         <div style={{ display: 'flex', gap: 16 }}>
           <div style={{ flex: 1 }}>
@@ -4040,21 +4291,24 @@ function TransformerResultPanel({ result, nodes, nodeId, allResults }) {
           <div style={{ flex: 1 }}>
             <div style={{ display: 'flex', alignItems: 'center', gap: 4 }}>
               <div style={dtStyle}>利用率</div>
-              {hFor('util')}
             </div>
             <div style={ddStyle}>{rd(utilization)}%</div>
           </div>
         </div>
       </div>
+
+      {/* カード2: ソースインピーダンス */}
       <div style={cardStyle}>
-        <div style={{ fontSize: 13, fontWeight: 700, marginBottom: 8, color: '#1976d2' }}>ソースインピーダンス</div>
+        <div style={secTitle()}>ソースインピーダンス</div>
         <div style={detailRow}><span>Rs</span><span>{rd(r.Rs * 1000, 2)} mΩ</span></div>
         <div style={detailRow}><span>Xs</span><span>{rd(r.Xs * 1000, 2)} mΩ</span></div>
         <div style={{ ...detailRow, borderBottom: 'none' }}><span>|Zs|</span><span>{rd(r.Zs * 1000, 2)} mΩ</span></div>
       </div>
+
+      {/* カード3: 接地設計 */}
       {r.groundFault && (
         <div style={cardStyle}>
-          <div style={{ fontSize: 13, fontWeight: 700, marginBottom: 8, color: '#1976d2', display: 'flex', alignItems: 'center', gap: 6 }}>接地設計{hFor('ground')}</div>
+          <div style={{ ...secTitle(), display: 'flex', alignItems: 'center', gap: 6 }}>接地設計{hFor('ground')}</div>
           <div style={detailRow}><span>一線地絡電流 Ig</span><span>{r.groundFault.Ig} A</span></div>
           <div style={detailRow}>
             <span>B種接地抵抗上限</span>
@@ -4068,6 +4322,140 @@ function TransformerResultPanel({ result, nodes, nodeId, allResults }) {
           </div>
           <div style={{ fontSize: 11, color: '#888', marginTop: 4 }}>
             Ig = 3ωCV = 3 × 2π × f × C × V/√3
+          </div>
+        </div>
+      )}
+
+      {/* カード4: 容量検討 (§19-6) */}
+      {a?.capacity && (
+        <div style={cardStyle}>
+          <div style={{ ...secTitle(), display: 'flex', alignItems: 'center', gap: 6 }}>
+            容量検討
+            <Badge ok={a.capacity.ok} label={a.capacity.ok ? 'OK' : 'NG'} />
+            {hFor('capacity')}
+          </div>
+          <div style={detailRow}><span>電動機合計</span><span>{a.capacity.sumMotorKVA} kVA</span></div>
+          <div style={detailRow}><span>一般合計</span><span>{a.capacity.sumGeneralKVA} kVA</span></div>
+          <div style={{ ...detailRow, fontWeight: 600 }}><span>需要合計</span><span>{a.capacity.totalDemandKVA} kVA</span></div>
+          <div style={{ ...detailRow, borderTop: '1px solid #e0e0e0', marginTop: 4, paddingTop: 6 }}>
+            <span>定格容量</span><span>{a.capacity.ratedKVA} kVA</span>
+          </div>
+          <div style={detailRow}><span>利用率</span><span>{a.capacity.utilization}%</span></div>
+          <div style={{ ...detailRow, borderBottom: 'none' }}>
+            <span>推奨容量</span>
+            <span style={{ color: a.capacity.recommendedKVA !== a.capacity.ratedKVA ? '#e65100' : 'inherit', fontWeight: a.capacity.recommendedKVA !== a.capacity.ratedKVA ? 600 : 400 }}>
+              {a.capacity.recommendedKVA} kVA
+              {a.capacity.recommendedKVA < a.capacity.ratedKVA && ' (現在より小さい容量で可)'}
+              {a.capacity.recommendedKVA > a.capacity.ratedKVA && ' (容量不足)'}
+            </span>
+          </div>
+        </div>
+      )}
+
+      {/* カード5: 不平衡率 (§19-7) */}
+      {a?.unbalance && (
+        <div style={cardStyle}>
+          <div style={{ ...secTitle(), display: 'flex', alignItems: 'center', gap: 6 }}>
+            不平衡率
+            <Badge ok={a.unbalance.ok} label={a.unbalance.ok ? 'OK' : 'NG'} />
+            {hFor('unbalance')}
+          </div>
+          {['R-S', 'S-T', 'T-R'].map(ph => {
+            const kva = a.unbalance.phaseLoads[ph];
+            const maxVal = Math.max(a.unbalance.maxPhase, 0.1);
+            const pct = maxVal > 0 ? kva / maxVal * 100 : 0;
+            const colors = { 'R-S': '#e53935', 'S-T': '#1e88e5', 'T-R': '#43a047' };
+            return (
+              <div key={ph} style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 6 }}>
+                <span style={{ width: 32, fontSize: 12, fontWeight: 600, color: colors[ph] }}>{ph}</span>
+                <div style={{ flex: 1, background: '#f5f5f5', borderRadius: 3, height: 16, overflow: 'hidden' }}>
+                  <div style={{ width: pct + '%', background: colors[ph], height: '100%', borderRadius: 3, transition: 'width 0.3s' }} />
+                </div>
+                <span style={{ width: 70, fontSize: 12, textAlign: 'right' }}>{kva} kVA</span>
+              </div>
+            );
+          })}
+          <div style={{ ...detailRow, marginTop: 8 }}>
+            <span>不平衡率</span><span>{a.unbalance.unbalanceRate}%</span>
+          </div>
+          <div style={detailRow}>
+            <span>単相負荷合計</span>
+            <span>
+              {a.unbalance.singlePhaseTotal} / {a.unbalance.singlePhaseLimit} kVA
+              {' '}
+              <span style={{ color: a.unbalance.singlePhaseOK ? '#2e7d32' : '#c62828', fontWeight: 600 }}>
+                {a.unbalance.singlePhaseOK ? 'OK' : 'NG'}
+              </span>
+            </span>
+          </div>
+          {a.unbalance.unassigned.length > 0 && (
+            <div style={{ fontSize: 11, color: '#e65100', marginTop: 6, padding: '4px 8px', background: '#fff3e0', borderRadius: 4 }}>
+              相未割当: {a.unbalance.unassigned.map(u => u.name + ' (' + u.kva + 'kVA)').join(', ')}
+            </div>
+          )}
+        </div>
+      )}
+
+      {/* カード6: 電圧変動率 (§19-8) */}
+      {a?.voltageRegulation && (
+        <div style={cardStyle}>
+          <div style={{ ...secTitle(), display: 'flex', alignItems: 'center', gap: 6 }}>
+            電圧変動率
+            <Badge ok={a.voltageRegulation.ok} label={a.voltageRegulation.ok ? 'OK' : 'NG'} />
+            {hFor('voltageReg')}
+          </div>
+          <div style={detailRow}>
+            <span>電圧変動率 ε</span><span>{a.voltageRegulation.epsilon}%</span>
+          </div>
+          <div style={detailRow}>
+            <span>二次電圧（負荷時）</span><span>{a.voltageRegulation.secondaryVoltageAtLoad} V</span>
+          </div>
+          <div style={{ ...detailRow, fontSize: 11, color: '#888' }}>
+            <span>p = %R × k</span><span>{a.voltageRegulation.p}</span>
+          </div>
+          <div style={{ ...detailRow, fontSize: 11, color: '#888' }}>
+            <span>q = %X × k</span><span>{a.voltageRegulation.q}</span>
+          </div>
+          <div style={{ ...detailRow, fontSize: 11, color: '#888', borderBottom: 'none' }}>
+            <span>加重平均力率</span><span>{a.voltageRegulation.cosTheta}</span>
+          </div>
+        </div>
+      )}
+
+      {/* カード7: 損失・効率 (§19-9) */}
+      {a?.losses && (
+        <div style={cardStyle}>
+          <div style={secTitle()}>損失・効率</div>
+          <div style={detailRow}><span>無負荷損 Wi</span><span>{a.losses.wi} W</span></div>
+          <div style={detailRow}><span>負荷損 Wc × k²</span><span>{a.losses.copperLoss} W</span></div>
+          <div style={{ ...detailRow, fontWeight: 600 }}><span>合計損失</span><span>{a.losses.totalLoss} W</span></div>
+          <div style={{ ...detailRow, borderTop: '1px solid #e0e0e0', marginTop: 4, paddingTop: 6 }}>
+            <span>効率</span><span>{a.losses.efficiency}%</span>
+          </div>
+          <div style={detailRow}>
+            <span>最高効率負荷率</span><span>{a.losses.optimalLoadRatio}%</span>
+          </div>
+          <div style={detailRow}>
+            <span>現在負荷率</span><span>{a.losses.loadRatio}%</span>
+          </div>
+          {a.losses.annualLossKWh != null && (
+            <div style={{ ...detailRow, borderBottom: 'none' }}>
+              <span>年間損失</span><span>{a.losses.annualLossKWh.toLocaleString()} kWh/年</span>
+            </div>
+          )}
+        </div>
+      )}
+
+      {/* カード8: 励磁突入電流 (§19-10) */}
+      {a?.inrush && (
+        <div style={cardStyle}>
+          <div style={secTitle()}>励磁突入電流</div>
+          <div style={detailRow}><span>定格電流 In</span><span>{a.inrush.In} A</span></div>
+          <div style={detailRow}><span>突入倍率</span><span>×{a.inrush.multiplier}</span></div>
+          <div style={{ ...detailRow, fontWeight: 600 }}><span>ピーク電流</span><span>{a.inrush.peakCurrent.toLocaleString()} A</span></div>
+          <div style={detailRow}><span>減衰時間</span><span>約 {a.inrush.duration_ms} ms</span></div>
+          <div style={{ fontSize: 11, color: '#888', marginTop: 4 }}>
+            {a.inrush.note}
           </div>
         </div>
       )}
@@ -4180,6 +4568,57 @@ function TransformerForm({ trParams, setTrParams, onSave, onCancel, isEdit }) {
             {['Δ-Y', 'Y-Y', 'Δ-Δ', 'Y-Δ', 'V-V'].map(c => <option key={c}>{c}</option>)}
           </select>
         </RC>
+        <RC label="総合需要率 [%]">
+          <input type="number" step="1" min="1" max="100"
+            value={trParams.diversityFactor || 100} style={numStyle}
+            onChange={e => setTrParams(p => ({ ...p, diversityFactor: Number(e.target.value) || 100 }))} />
+        </RC>
+      </Sec>
+      <Sec title="損失データ (§19-9)">
+        {(() => {
+          const autoL = getAutoLoss(trParams);
+          const lossAuto = trParams.lossAuto !== false;
+          const dispWi = lossAuto ? autoL.wi_W : (trParams.wi_W || 0);
+          const dispWc = lossAuto ? autoL.wc_W : (trParams.wc_W || 0);
+          return (
+            <>
+              <RC label="無負荷損 Wi [W]">
+                <div style={{ display: 'flex', gap: 6, alignItems: 'center' }}>
+                  <input type="number" step="1" value={dispWi}
+                    style={{ ...numStyle, flex: 1 }}
+                    disabled={lossAuto}
+                    onChange={e => setTrParams(p => ({ ...p, wi_W: Number(e.target.value) || 0 }))} />
+                  <label style={{ fontSize: 12, whiteSpace: 'nowrap' }}>
+                    <input type="checkbox" checked={lossAuto}
+                      onChange={e => {
+                        const auto = e.target.checked;
+                        setTrParams(p => ({ ...p, lossAuto: auto,
+                          ...(auto ? { wi_W: null, wc_W: null } : { wi_W: autoL.wi_W, wc_W: autoL.wc_W })
+                        }));
+                      }} /> Auto
+                  </label>
+                </div>
+              </RC>
+              <RC label="負荷損 Wc [W]">
+                <input type="number" step="1" value={dispWc}
+                  style={numStyle} disabled={lossAuto}
+                  onChange={e => setTrParams(p => ({ ...p, wc_W: Number(e.target.value) || 0 }))} />
+              </RC>
+              <RC label="年間負荷率 [%]">
+                <input type="number" step="1" min="0" max="100"
+                  placeholder="未入力"
+                  value={trParams.annualLoadFactor != null ? trParams.annualLoadFactor : ''}
+                  style={numStyle}
+                  onChange={e => setTrParams(p => ({ ...p,
+                    annualLoadFactor: e.target.value === '' ? null : Number(e.target.value)
+                  }))} />
+                <div style={{ fontSize: 11, color: '#888', marginTop: 2 }}>
+                  入力すると年間損失エネルギーを算出
+                </div>
+              </RC>
+            </>
+          );
+        })()}
       </Sec>
       <Sec title="高圧系統（受電側）">
         <RC label="HV ケーブル種別">
@@ -6235,15 +6674,15 @@ function App() {
           const imported = data.nodes.map(n => {
             let newId = n.id;
             if (existingIds.has(n.id)) { newId = genId(); idMap[n.id] = newId; }
-            /* M2-3: 新フィールドのデフォルト補完 */
+            /* M2-3 / P7: 新フィールドのデフォルト補完 */
             if (n.type === 'load' && n.load) {
-              n.load = { ...n.load, spareFactor: n.load.spareFactor || 0, icuClass: n.load.icuClass || 'standard', hasELCB: n.load.hasELCB || false, elcbSensitivity_mA: n.load.elcbSensitivity_mA || 30, groundingMethod: n.load.groundingMethod || 'TT', groundResistance_ohm: n.load.groundResistance_ohm || 100 };
+              n.load = { ...n.load, spareFactor: n.load.spareFactor || 0, icuClass: n.load.icuClass || 'standard', hasELCB: n.load.hasELCB || false, elcbSensitivity_mA: n.load.elcbSensitivity_mA || 30, groundingMethod: n.load.groundingMethod || 'TT', groundResistance_ohm: n.load.groundResistance_ohm || 100, phase: n.load.phase || '自動' };
             }
             if (n.type === 'trunk' && n.trunk) {
               n.trunk = { ...n.trunk, icuClass: n.trunk.icuClass || 'standard', branchName: n.trunk.branchName || '', branchMainMCCB: n.trunk.branchMainMCCB || '自動' };
             }
             if (n.type === 'transformer' && n.transformer) {
-              n.transformer = { ...n.transformer, hvSystem: { cableType: null, cableSize_mm2: null, totalCableLength_km: null, capacitance_uF_per_km: null, vcbTripTime_s: 1.0, ...(n.transformer.hvSystem || {}) } };
+              n.transformer = { ...n.transformer, hvSystem: { cableType: null, cableSize_mm2: null, totalCableLength_km: null, capacitance_uF_per_km: null, vcbTripTime_s: 1.0, ...(n.transformer.hvSystem || {}) }, lossAuto: n.transformer.lossAuto !== undefined ? n.transformer.lossAuto : true, wi_W: n.transformer.wi_W || null, wc_W: n.transformer.wc_W || null, diversityFactor: n.transformer.diversityFactor || 100, annualLoadFactor: n.transformer.annualLoadFactor || null };
             }
             return { ...n, id: newId, canvas: n.canvas || null };
           }).map(n => ({
@@ -6521,6 +6960,20 @@ function App() {
                 <RC label="周波数">
                   <select value={params.freq} style={selStyle} onChange={e => updateSelect('freq', e.target.value)}>
                     <option>50Hz</option><option>60Hz</option>
+                  </select>
+                </RC>
+                <RC label="接続相" show={params.system.startsWith('単相')}>
+                  <select value={params.phase || '自動'} style={selStyle}
+                    onChange={e => setParams(p => ({ ...p, phase: e.target.value }))}>
+                    <option value="自動">自動</option>
+                    {params.voltage >= 190
+                      ? [<option key="R-S" value="R-S">R-S</option>,
+                         <option key="S-T" value="S-T">S-T</option>,
+                         <option key="T-R" value="T-R">T-R</option>]
+                      : [<option key="R-N" value="R-N">R-N</option>,
+                         <option key="S-N" value="S-N">S-N</option>,
+                         <option key="T-N" value="T-N">T-N</option>]
+                    }
                   </select>
                 </RC>
                 <RC label="供給方式">
