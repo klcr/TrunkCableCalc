@@ -4092,7 +4092,7 @@ function ResultPanel({ result, params }) {
         </div>
         <div style={cellStyle}>
           <div style={{ display: 'flex', alignItems: 'center', gap: 4, marginBottom: 3 }}>
-            <Badge ok={r.pathVdOK != null ? r.pathVdOK : r.vdOK} label="電圧降下" />
+            <Badge ok={r.pathVdOK != null ? r.pathVdOK : r.vdOK} label={r.vdOK && r.pathVdOK === false ? '累積電圧降下' : '電圧降下'} />
             {hFor('vd')}
           </div>
           <div style={detailRow}><span>Z</span><span>{r.Z} Ω/km</span></div>
@@ -7237,8 +7237,8 @@ function App() {
                           {activeResult.vdOK != null && (
                             <span style={{
                               padding: '1px 6px', borderRadius: 3, fontSize: 10, fontWeight: 600,
-                              color: '#fff', background: activeResult.vdOK ? '#4caf50' : '#f44336'
-                            }}>電圧降下</span>
+                              color: '#fff', background: (activeResult.pathVdOK != null ? activeResult.pathVdOK : activeResult.vdOK) ? '#4caf50' : '#f44336'
+                            }}>{activeResult.vdOK && activeResult.pathVdOK === false ? '累積VD' : '電圧降下'}</span>
                           )}
                           {activeResult.protOK != null && (
                             <span style={{
