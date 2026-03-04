@@ -4012,28 +4012,29 @@ function ResultPanel({ result, params }) {
 
   const panelStyle = {
     background: '#fff', border: '1px solid #e0e0e0', borderRadius: 8,
-    padding: 16, marginBottom: 16, borderLeft: `4px solid ${r.ok ? '#4caf50' : '#f44336'}`
+    padding: '12px 12px 8px', marginBottom: 8, borderLeft: `4px solid ${r.ok ? '#4caf50' : '#f44336'}`
   };
-  const rowStyle = { display: 'flex', gap: 12, padding: '8px 0', borderBottom: '1px solid #f0f0f0' };
+  const rowStyle = { display: 'flex', gap: 8, padding: '6px 0', borderBottom: '1px solid #f0f0f0' };
+  const row3Style = { display: 'flex', gap: 8, padding: '6px 0', borderBottom: '1px solid #f0f0f0' };
   const cellStyle = { flex: 1, minWidth: 0 };
-  const sectionTitle = { fontSize: 13, fontWeight: 700, color: '#1976d2', marginBottom: 4 };
+  const sectionTitle = { fontSize: 12, fontWeight: 700, color: '#1976d2', marginBottom: 3 };
   const dtStyle = { fontSize: 11, color: '#888', marginBottom: 1 };
-  const ddStyle = { fontSize: 16, fontWeight: 700 };
-  const detailRow = { display: 'flex', justifyContent: 'space-between', fontSize: 12, padding: '2px 0', color: '#555' };
+  const ddStyle = { fontSize: 15, fontWeight: 700 };
+  const detailRow = { display: 'flex', justifyContent: 'space-between', fontSize: 11, padding: '1px 0', color: '#555' };
 
   return (
     <div style={panelStyle}>
       {/* 1段目: [総合判定] [選定ケーブル, MCCB定格, 設計電流] */}
       <div style={rowStyle}>
-        <div style={{ display: 'flex', flexDirection: 'column', justifyContent: 'center', minWidth: 60 }}>
+        <div style={{ display: 'flex', flexDirection: 'column', justifyContent: 'center', minWidth: 50 }}>
           <span style={{
-            fontSize: 20, fontWeight: 700, textAlign: 'center',
+            fontSize: 18, fontWeight: 700, textAlign: 'center',
             color: r.ok ? '#4caf50' : '#f44336'
           }}>{r.ok ? 'OK' : 'NG'}</span>
-          <span style={{ fontSize: 10, color: '#888', textAlign: 'center' }}>総合判定</span>
+          <span style={{ fontSize: 9, color: '#888', textAlign: 'center' }}>総合判定</span>
           {hFor('summary')}
         </div>
-        <div style={{ display: 'flex', gap: 16, flex: 1 }}>
+        <div style={{ display: 'flex', gap: 12, flex: 1 }}>
           <div style={cellStyle}>
             <div style={dtStyle}>選定ケーブル</div>
             <div style={ddStyle}>{params.cableType} {r.size}{r.parallel > 1 ? `×${r.parallel}` : ''} mm²</div>
@@ -4074,10 +4075,10 @@ function ResultPanel({ result, params }) {
         </div>
       )}
 
-      {/* 2段目: [許容電流] [電圧降下] */}
-      <div style={rowStyle}>
+      {/* 2段目: [許容電流] [電圧降下] [保護協調] — 3カラム */}
+      <div style={row3Style}>
         <div style={cellStyle}>
-          <div style={{ display: 'flex', alignItems: 'center', gap: 6, marginBottom: 4 }}>
+          <div style={{ display: 'flex', alignItems: 'center', gap: 4, marginBottom: 3 }}>
             <Badge ok={r.ampacityOK} label="許容電流" />
             {hFor('ampacity')}
           </div>
@@ -4090,8 +4091,8 @@ function ResultPanel({ result, params }) {
           </div>
         </div>
         <div style={cellStyle}>
-          <div style={{ display: 'flex', alignItems: 'center', gap: 6, marginBottom: 4 }}>
-            <Badge ok={r.pathVdOK != null ? r.pathVdOK : r.vdOK} label="電圧降下" />
+          <div style={{ display: 'flex', alignItems: 'center', gap: 4, marginBottom: 3 }}>
+            <Badge ok={r.pathVdOK != null ? r.pathVdOK : r.vdOK} label={r.vdOK && r.pathVdOK === false ? '累積電圧降下' : '電圧降下'} />
             {hFor('vd')}
           </div>
           <div style={detailRow}><span>Z</span><span>{r.Z} Ω/km</span></div>
@@ -4101,7 +4102,7 @@ function ResultPanel({ result, params }) {
           </div>
           <div style={detailRow}><span>許容値</span><span>{r.allowVd} V ({r.allowVdPercent}%)</span></div>
           {r.totalPathLength != null && (
-            <div style={{ marginTop: 4, paddingTop: 4, borderTop: '1px dashed #e0e0e0' }}>
+            <div style={{ marginTop: 3, paddingTop: 3, borderTop: '1px dashed #e0e0e0' }}>
               <div style={detailRow}>
                 <span>総亘長</span>
                 <span>{r.totalPathLength}m</span>
@@ -4123,12 +4124,8 @@ function ResultPanel({ result, params }) {
             </div>
           )}
         </div>
-      </div>
-
-      {/* 3段目: [保護協調] [累積電圧降下] */}
-      <div style={{ ...rowStyle, borderBottom: 'none' }}>
         <div style={cellStyle}>
-          <div style={{ display: 'flex', alignItems: 'center', gap: 6, marginBottom: 4 }}>
+          <div style={{ display: 'flex', alignItems: 'center', gap: 4, marginBottom: 3 }}>
             <Badge ok={r.protOK} label="保護協調" />
             {hFor('prot')}
           </div>
@@ -4143,10 +4140,14 @@ function ResultPanel({ result, params }) {
             </span>
           </div>
         </div>
+      </div>
+
+      {/* 3段目: [累積電圧降下] [短絡電流] [分岐ブレーカー/地絡保護] — 3カラム */}
+      <div style={{ ...row3Style, borderBottom: 'none' }}>
         <div style={cellStyle}>
           {r.cumulativeVd != null && r.cumulativeVd > 0 ? (
             <React.Fragment>
-              <div style={{ display: 'flex', alignItems: 'center', gap: 6, fontSize: 13, fontWeight: 700, color: '#1976d2', marginBottom: 4 }}>累積電圧降下{hFor('cumVd')}</div>
+              <div style={{ display: 'flex', alignItems: 'center', gap: 4, fontSize: 12, fontWeight: 700, color: '#1976d2', marginBottom: 3 }}>累積電圧降下{hFor('cumVd')}</div>
               <div style={{ ...detailRow, fontWeight: 700 }}>
                 <span>変圧器からの累積</span>
                 <span>{r.cumulativeVd} V ({r.cumulativeVdP}%)</span>
@@ -4154,93 +4155,103 @@ function ResultPanel({ result, params }) {
             </React.Fragment>
           ) : (
             <React.Fragment>
-              <div style={{ fontSize: 13, fontWeight: 700, color: '#ccc', marginBottom: 4 }}>累積電圧降下</div>
-              <div style={{ fontSize: 12, color: '#ccc' }}>—</div>
+              <div style={{ fontSize: 12, fontWeight: 700, color: '#ccc', marginBottom: 3 }}>累積電圧降下</div>
+              <div style={{ fontSize: 11, color: '#ccc' }}>—</div>
+            </React.Fragment>
+          )}
+        </div>
+        <div style={cellStyle}>
+          {r.Isc3 != null ? (
+            <React.Fragment>
+              <div style={{ ...sectionTitle, display: 'flex', alignItems: 'center', gap: 4 }}>短絡電流{hFor('fault')}</div>
+              <div style={detailRow}><span>Isc₃</span><span>{rd(r.Isc3 / 1000, 1)} kA</span></div>
+              {r.size && (() => {
+                const wt = checkWithstand(r.size, r.Isc3, 0.1, r.parallel);
+                return (
+                  <div style={{ ...detailRow, fontWeight: 700 }}>
+                    <span>熱耐量</span>
+                    <span><Badge ok={wt.ok} label={wt.ok ? 'OK' : 'NG'} /></span>
+                  </div>
+                );
+              })()}
+              {r.icuKA != null && (
+                <div style={{ ...detailRow, fontWeight: 700 }}>
+                  <span>遮断容量</span>
+                  <span>{r.icuKA}kA <Badge ok={r.icuOK} label={r.icuOK ? 'OK' : 'NG'} /></span>
+                </div>
+              )}
+            </React.Fragment>
+          ) : (
+            <React.Fragment>
+              <div style={{ fontSize: 12, fontWeight: 700, color: '#ccc', marginBottom: 3 }}>短絡電流</div>
+              <div style={{ fontSize: 11, color: '#ccc' }}>—</div>
+            </React.Fragment>
+          )}
+        </div>
+        <div style={cellStyle}>
+          {r.branchBreaker ? (
+            <React.Fragment>
+              <div style={{ ...sectionTitle, display: 'flex', alignItems: 'center', gap: 4 }}>分岐ブレーカー{hFor('bb')}</div>
+              <div style={detailRow}>
+                <span>判定</span>
+                <span style={{ fontWeight: 700, color: r.branchBreaker.required ? '#e65100' : '#4caf50' }}>
+                  {r.branchBreaker.required ? '設置必須' : '省略可'}
+                </span>
+              </div>
+              <div style={detailRow}>
+                <span>根拠</span>
+                <span>{r.branchBreaker.rule}</span>
+              </div>
+              {r.branchBreaker.ratio != null && (
+                <div style={detailRow}>
+                  <span>IW/IB</span>
+                  <span>{r.branchBreaker.ratio}%</span>
+                </div>
+              )}
+            </React.Fragment>
+          ) : r.elcbCheck ? (
+            <React.Fragment>
+              <div style={{ ...sectionTitle, display: 'flex', alignItems: 'center', gap: 4 }}>地絡保護{hFor('elcb')}</div>
+              <div style={detailRow}>
+                <span>ELCB 感度</span>
+                <span>{r.elcbCheck.IΔn_mA} mA</span>
+              </div>
+              {r.elcbCheck.method === 'TT' && (
+                <div style={{ ...detailRow, fontWeight: 700 }}>
+                  <span>接触電圧</span>
+                  <span>{r.elcbCheck.touchV} V <Badge ok={r.elcbCheck.ok} label={r.elcbCheck.ok ? 'OK' : 'NG'} /></span>
+                </div>
+              )}
+            </React.Fragment>
+          ) : (
+            <React.Fragment>
+              <div style={{ fontSize: 12, fontWeight: 700, color: '#ccc', marginBottom: 3 }}>分岐ブレーカー</div>
+              <div style={{ fontSize: 11, color: '#ccc' }}>—</div>
             </React.Fragment>
           )}
         </div>
       </div>
 
-      {/* 短絡電流（変圧器接続時） */}
-      {r.Isc3 != null && (
-        <div style={{ borderTop: '1px solid #f0f0f0', paddingTop: 8, marginTop: 4 }}>
-          <div style={{ ...sectionTitle, display: 'flex', alignItems: 'center', gap: 6 }}>短絡電流{hFor('fault')}</div>
-          <div style={{ display: 'flex', gap: 12 }}>
-            <div style={cellStyle}>
-              <div style={detailRow}><span>Isc₃</span><span>{rd(r.Isc3 / 1000, 1)} kA</span></div>
-              <div style={detailRow}><span>累積 R</span><span>{rd(r.Rcum * 1000, 2)} mΩ</span></div>
-              <div style={detailRow}><span>累積 X</span><span>{rd(r.Xcum * 1000, 2)} mΩ</span></div>
-            </div>
-            <div style={cellStyle}>
-              {r.size && (() => {
-                const wt = checkWithstand(r.size, r.Isc3, 0.1, r.parallel);
-                return (
-                  <React.Fragment>
-                    <div style={detailRow}><span>耐電流 (K=134, t=0.1s)</span><span>{rd(wt.Iwithstand / 1000, 1)} kA</span></div>
-                    <div style={{ ...detailRow, fontWeight: 700 }}>
-                      <span>熱耐量</span>
-                      <span><Badge ok={wt.ok} label={wt.ok ? 'OK' : 'NG'} /></span>
-                    </div>
-                  </React.Fragment>
-                );
-              })()}
-              {r.icuKA != null && (
-                <div style={{ ...detailRow, fontWeight: 700, marginTop: 4 }}>
-                  <span>遮断容量 Icu</span>
-                  <span>{r.icuKA} kA <Badge ok={r.icuOK} label={r.icuOK ? 'OK' : 'NG'} /></span>
-                </div>
-              )}
-            </div>
-          </div>
+      {/* 追加情報（3カラムに収まらない詳細） */}
+      {r.Isc3 != null && (r.Rcum != null || r.Xcum != null) && (
+        <div style={{ borderTop: '1px solid #f0f0f0', paddingTop: 4, marginTop: 2, display: 'flex', gap: 12, fontSize: 11, color: '#888' }}>
+          <span>累積 R: {rd(r.Rcum * 1000, 2)} mΩ</span>
+          <span>累積 X: {rd(r.Xcum * 1000, 2)} mΩ</span>
+          {r.size && (() => {
+            const wt = checkWithstand(r.size, r.Isc3, 0.1, r.parallel);
+            return <span>耐電流 (K=134, t=0.1s): {rd(wt.Iwithstand / 1000, 1)} kA</span>;
+          })()}
         </div>
       )}
-
-      {/* 地絡保護（ELCB 設定回路のみ） */}
-      {r.elcbCheck && (
-        <div style={{ borderTop: '1px solid #f0f0f0', paddingTop: 8, marginTop: 4 }}>
-          <div style={{ ...sectionTitle, display: 'flex', alignItems: 'center', gap: 6 }}>地絡保護{hFor('elcb')}</div>
-          <div style={detailRow}>
-            <span>ELCB 感度 IΔn</span>
-            <span>{r.elcbCheck.IΔn_mA} mA</span>
+      {r.elcbCheck && r.branchBreaker && (
+        <div style={{ borderTop: '1px solid #f0f0f0', paddingTop: 4, marginTop: 2 }}>
+          <div style={{ ...sectionTitle, display: 'flex', alignItems: 'center', gap: 4, fontSize: 11 }}>地絡保護{hFor('elcb')}</div>
+          <div style={{ display: 'flex', gap: 12, fontSize: 11, color: '#555' }}>
+            <span>ELCB 感度: {r.elcbCheck.IΔn_mA} mA</span>
+            {r.elcbCheck.method === 'TT' && (
+              <span>接触電圧: {r.elcbCheck.touchV} V <Badge ok={r.elcbCheck.ok} label={r.elcbCheck.ok ? 'OK' : 'NG'} /></span>
+            )}
           </div>
-          {r.elcbCheck.method === 'TT' && (
-            <React.Fragment>
-              <div style={{ ...detailRow, fontWeight: 700 }}>
-                <span>接触電圧 RA×IΔn</span>
-                <span>{r.elcbCheck.touchV} V <Badge ok={r.elcbCheck.ok} label={r.elcbCheck.ok ? 'OK' : 'NG'} /></span>
-              </div>
-              <div style={{ fontSize: 11, color: '#888', marginTop: 2 }}>{r.elcbCheck.formula}</div>
-            </React.Fragment>
-          )}
-          {r.lvGroundFault && (
-            <div style={detailRow}>
-              <span>LV側地絡電流</span>
-              <span>{r.lvGroundFault.Ig_lv} A</span>
-            </div>
-          )}
-        </div>
-      )}
-
-      {/* 分岐ブレーカー省略条件 (電技解釈148条4号) */}
-      {r.branchBreaker && (
-        <div style={{ borderTop: '1px solid #f0f0f0', paddingTop: 8, marginTop: 4 }}>
-          <div style={{ ...sectionTitle, display: 'flex', alignItems: 'center', gap: 6 }}>分岐ブレーカー{hFor('bb')}</div>
-          <div style={detailRow}>
-            <span>判定</span>
-            <span style={{ fontWeight: 700, color: r.branchBreaker.required ? '#e65100' : '#4caf50' }}>
-              {r.branchBreaker.required ? '設置必須' : '省略可'}
-            </span>
-          </div>
-          <div style={detailRow}>
-            <span>根拠</span>
-            <span>{r.branchBreaker.rule}</span>
-          </div>
-          {r.branchBreaker.ratio != null && (
-            <div style={detailRow}>
-              <span>IW/IB 比率</span>
-              <span>{r.branchBreaker.ratio}% （IW={r.branchBreaker.IW}A / IB={r.branchBreaker.IB}AT）</span>
-            </div>
-          )}
         </div>
       )}
 
@@ -4265,11 +4276,12 @@ function TransformerResultPanel({ result, nodes, nodeId, allResults }) {
   if (!result) return null;
   const r = result;
   const a = r.analysis;
-  const cardStyle = { background: '#fff', border: '1px solid #e0e0e0', borderRadius: 8, padding: 16, marginBottom: 16 };
-  const dtStyle = { fontSize: 12, color: '#888', marginBottom: 2 };
-  const ddStyle = { fontSize: 18, fontWeight: 700, marginBottom: 8 };
-  const detailRow = { display: 'flex', justifyContent: 'space-between', fontSize: 13, padding: '3px 0', borderBottom: '1px solid #f0f0f0' };
-  const secTitle = (text) => ({ fontSize: 13, fontWeight: 700, marginBottom: 8, color: '#1976d2' });
+  const cardStyle = { background: '#fff', border: '1px solid #e0e0e0', borderRadius: 8, padding: '10px 12px', marginBottom: 8 };
+  const dtStyle = { fontSize: 11, color: '#888', marginBottom: 1 };
+  const ddStyle = { fontSize: 16, fontWeight: 700, marginBottom: 4 };
+  const detailRow = { display: 'flex', justifyContent: 'space-between', fontSize: 12, padding: '2px 0', borderBottom: '1px solid #f5f5f5' };
+  const secTitle = (text) => ({ fontSize: 12, fontWeight: 700, marginBottom: 6, color: '#1976d2' });
+  const gridStyle = { display: 'grid', gridTemplateColumns: 'repeat(3, 1fr)', gap: 8 };
 
   const utilization = a?.capacity?.utilization || 0;
   const trHints = getTransformerHints(r, utilization, a);
@@ -4277,9 +4289,9 @@ function TransformerResultPanel({ result, nodes, nodeId, allResults }) {
 
   return (
     <div>
-      {/* カード1: 基本情報 */}
+      {/* カード1: 基本情報 — 3カラム */}
       <div style={cardStyle}>
-        <div style={{ display: 'flex', gap: 16 }}>
+        <div style={{ display: 'flex', gap: 12 }}>
           <div style={{ flex: 1 }}>
             <div style={dtStyle}>定格二次電流</div>
             <div style={ddStyle}>{rd(r.In)} A</div>
@@ -4289,173 +4301,172 @@ function TransformerResultPanel({ result, nodes, nodeId, allResults }) {
             <div style={ddStyle}>{rd(r.Isc3 / 1000, 1)} kA</div>
           </div>
           <div style={{ flex: 1 }}>
-            <div style={{ display: 'flex', alignItems: 'center', gap: 4 }}>
-              <div style={dtStyle}>利用率</div>
-            </div>
+            <div style={dtStyle}>利用率</div>
             <div style={ddStyle}>{rd(utilization)}%</div>
           </div>
         </div>
       </div>
 
-      {/* カード2: ソースインピーダンス */}
-      <div style={cardStyle}>
-        <div style={secTitle()}>ソースインピーダンス</div>
-        <div style={detailRow}><span>Rs</span><span>{rd(r.Rs * 1000, 2)} mΩ</span></div>
-        <div style={detailRow}><span>Xs</span><span>{rd(r.Xs * 1000, 2)} mΩ</span></div>
-        <div style={{ ...detailRow, borderBottom: 'none' }}><span>|Zs|</span><span>{rd(r.Zs * 1000, 2)} mΩ</span></div>
+      {/* 3カラム自動フローグリッド */}
+      <div style={gridStyle}>
+        {/* ソースインピーダンス */}
+        <div style={cardStyle}>
+          <div style={secTitle()}>ソースインピーダンス</div>
+          <div style={detailRow}><span>Rs</span><span>{rd(r.Rs * 1000, 2)} mΩ</span></div>
+          <div style={detailRow}><span>Xs</span><span>{rd(r.Xs * 1000, 2)} mΩ</span></div>
+          <div style={{ ...detailRow, borderBottom: 'none' }}><span>|Zs|</span><span>{rd(r.Zs * 1000, 2)} mΩ</span></div>
+        </div>
+
+        {/* 容量検討 */}
+        {a?.capacity && (
+          <div style={cardStyle}>
+            <div style={{ ...secTitle(), display: 'flex', alignItems: 'center', gap: 4 }}>
+              容量検討
+              <Badge ok={a.capacity.ok} label={a.capacity.ok ? 'OK' : 'NG'} />
+              {hFor('capacity')}
+            </div>
+            <div style={detailRow}><span>電動機合計</span><span>{a.capacity.sumMotorKVA} kVA</span></div>
+            <div style={detailRow}><span>一般合計</span><span>{a.capacity.sumGeneralKVA} kVA</span></div>
+            <div style={{ ...detailRow, fontWeight: 600 }}><span>需要合計</span><span>{a.capacity.totalDemandKVA} kVA</span></div>
+            <div style={{ ...detailRow, borderTop: '1px solid #e0e0e0', marginTop: 3, paddingTop: 4 }}>
+              <span>定格容量</span><span>{a.capacity.ratedKVA} kVA</span>
+            </div>
+            <div style={detailRow}><span>利用率</span><span>{a.capacity.utilization}%</span></div>
+            <div style={{ ...detailRow, borderBottom: 'none' }}>
+              <span>推奨容量</span>
+              <span style={{ color: a.capacity.recommendedKVA !== a.capacity.ratedKVA ? '#e65100' : 'inherit', fontWeight: a.capacity.recommendedKVA !== a.capacity.ratedKVA ? 600 : 400 }}>
+                {a.capacity.recommendedKVA} kVA
+                {a.capacity.recommendedKVA < a.capacity.ratedKVA && ' (小容量可)'}
+                {a.capacity.recommendedKVA > a.capacity.ratedKVA && ' (容量不足)'}
+              </span>
+            </div>
+          </div>
+        )}
+
+        {/* 不平衡率 */}
+        {a?.unbalance && (
+          <div style={cardStyle}>
+            <div style={{ ...secTitle(), display: 'flex', alignItems: 'center', gap: 4 }}>
+              不平衡率
+              <Badge ok={a.unbalance.ok} label={a.unbalance.ok ? 'OK' : 'NG'} />
+              {hFor('unbalance')}
+            </div>
+            {['R-S', 'S-T', 'T-R'].map(ph => {
+              const kva = a.unbalance.phaseLoads[ph];
+              const maxVal = Math.max(a.unbalance.maxPhase, 0.1);
+              const pct = maxVal > 0 ? kva / maxVal * 100 : 0;
+              const colors = { 'R-S': '#e53935', 'S-T': '#1e88e5', 'T-R': '#43a047' };
+              return (
+                <div key={ph} style={{ display: 'flex', alignItems: 'center', gap: 6, marginBottom: 4 }}>
+                  <span style={{ width: 28, fontSize: 11, fontWeight: 600, color: colors[ph] }}>{ph}</span>
+                  <div style={{ flex: 1, background: '#f5f5f5', borderRadius: 3, height: 14, overflow: 'hidden' }}>
+                    <div style={{ width: pct + '%', background: colors[ph], height: '100%', borderRadius: 3, transition: 'width 0.3s' }} />
+                  </div>
+                  <span style={{ width: 60, fontSize: 11, textAlign: 'right' }}>{kva} kVA</span>
+                </div>
+              );
+            })}
+            <div style={{ ...detailRow, marginTop: 4 }}>
+              <span>不平衡率</span><span>{a.unbalance.unbalanceRate}%</span>
+            </div>
+            <div style={detailRow}>
+              <span>単相負荷合計</span>
+              <span>
+                {a.unbalance.singlePhaseTotal} / {a.unbalance.singlePhaseLimit} kVA
+                {' '}
+                <span style={{ color: a.unbalance.singlePhaseOK ? '#2e7d32' : '#c62828', fontWeight: 600 }}>
+                  {a.unbalance.singlePhaseOK ? 'OK' : 'NG'}
+                </span>
+              </span>
+            </div>
+            {a.unbalance.unassigned.length > 0 && (
+              <div style={{ fontSize: 10, color: '#e65100', marginTop: 4, padding: '3px 6px', background: '#fff3e0', borderRadius: 3 }}>
+                相未割当: {a.unbalance.unassigned.map(u => u.name + ' (' + u.kva + 'kVA)').join(', ')}
+              </div>
+            )}
+          </div>
+        )}
+
+        {/* 電圧変動率 */}
+        {a?.voltageRegulation && (
+          <div style={cardStyle}>
+            <div style={{ ...secTitle(), display: 'flex', alignItems: 'center', gap: 4 }}>
+              電圧変動率
+              <Badge ok={a.voltageRegulation.ok} label={a.voltageRegulation.ok ? 'OK' : 'NG'} />
+              {hFor('voltageReg')}
+            </div>
+            <div style={detailRow}>
+              <span>変動率 ε</span><span>{a.voltageRegulation.epsilon}%</span>
+            </div>
+            <div style={detailRow}>
+              <span>二次電圧(負荷時)</span><span>{a.voltageRegulation.secondaryVoltageAtLoad} V</span>
+            </div>
+            <div style={{ ...detailRow, fontSize: 10, color: '#888' }}>
+              <span>p = %R × k</span><span>{a.voltageRegulation.p}</span>
+            </div>
+            <div style={{ ...detailRow, fontSize: 10, color: '#888', borderBottom: 'none' }}>
+              <span>q = %X × k</span><span>{a.voltageRegulation.q}</span>
+            </div>
+          </div>
+        )}
+
+        {/* 損失・効率 */}
+        {a?.losses && (
+          <div style={cardStyle}>
+            <div style={secTitle()}>損失・効率</div>
+            <div style={detailRow}><span>無負荷損 Wi</span><span>{a.losses.wi} W</span></div>
+            <div style={detailRow}><span>負荷損 Wc×k²</span><span>{a.losses.copperLoss} W</span></div>
+            <div style={{ ...detailRow, fontWeight: 600 }}><span>合計損失</span><span>{a.losses.totalLoss} W</span></div>
+            <div style={{ ...detailRow, borderTop: '1px solid #e0e0e0', marginTop: 3, paddingTop: 4 }}>
+              <span>効率</span><span>{a.losses.efficiency}%</span>
+            </div>
+            <div style={detailRow}>
+              <span>最高効率負荷率</span><span>{a.losses.optimalLoadRatio}%</span>
+            </div>
+            <div style={detailRow}>
+              <span>現在負荷率</span><span>{a.losses.loadRatio}%</span>
+            </div>
+            {a.losses.annualLossKWh != null && (
+              <div style={{ ...detailRow, borderBottom: 'none' }}>
+                <span>年間損失</span><span>{a.losses.annualLossKWh.toLocaleString()} kWh/年</span>
+              </div>
+            )}
+          </div>
+        )}
+
+        {/* 接地設計 */}
+        {r.groundFault && (
+          <div style={cardStyle}>
+            <div style={{ ...secTitle(), display: 'flex', alignItems: 'center', gap: 4 }}>接地設計{hFor('ground')}</div>
+            <div style={detailRow}><span>地絡電流 Ig</span><span>{r.groundFault.Ig} A</span></div>
+            <div style={detailRow}>
+              <span>B種接地上限</span>
+              <span>
+                {r.groundFault.vcbTripTime_s <= 0.5
+                  ? r.groundFault.Rb_05s + ' Ω (150/Ig)'
+                  : r.groundFault.vcbTripTime_s <= 1.0
+                    ? r.groundFault.Rb_1s + ' Ω (600/Ig)'
+                    : r.groundFault.Rb_2s + ' Ω (300/Ig)'}
+              </span>
+            </div>
+            <div style={{ fontSize: 10, color: '#888', marginTop: 2 }}>
+              Ig = 3ωCV = 3 × 2π × f × C × V/√3
+            </div>
+          </div>
+        )}
       </div>
 
-      {/* カード3: 接地設計 */}
-      {r.groundFault && (
-        <div style={cardStyle}>
-          <div style={{ ...secTitle(), display: 'flex', alignItems: 'center', gap: 6 }}>接地設計{hFor('ground')}</div>
-          <div style={detailRow}><span>一線地絡電流 Ig</span><span>{r.groundFault.Ig} A</span></div>
-          <div style={detailRow}>
-            <span>B種接地抵抗上限</span>
-            <span>
-              {r.groundFault.vcbTripTime_s <= 0.5
-                ? r.groundFault.Rb_05s + ' Ω (150/Ig)'
-                : r.groundFault.vcbTripTime_s <= 1.0
-                  ? r.groundFault.Rb_1s + ' Ω (600/Ig)'
-                  : r.groundFault.Rb_2s + ' Ω (300/Ig)'}
-            </span>
-          </div>
-          <div style={{ fontSize: 11, color: '#888', marginTop: 4 }}>
-            Ig = 3ωCV = 3 × 2π × f × C × V/√3
-          </div>
-        </div>
-      )}
-
-      {/* カード4: 容量検討 (§19-6) */}
-      {a?.capacity && (
-        <div style={cardStyle}>
-          <div style={{ ...secTitle(), display: 'flex', alignItems: 'center', gap: 6 }}>
-            容量検討
-            <Badge ok={a.capacity.ok} label={a.capacity.ok ? 'OK' : 'NG'} />
-            {hFor('capacity')}
-          </div>
-          <div style={detailRow}><span>電動機合計</span><span>{a.capacity.sumMotorKVA} kVA</span></div>
-          <div style={detailRow}><span>一般合計</span><span>{a.capacity.sumGeneralKVA} kVA</span></div>
-          <div style={{ ...detailRow, fontWeight: 600 }}><span>需要合計</span><span>{a.capacity.totalDemandKVA} kVA</span></div>
-          <div style={{ ...detailRow, borderTop: '1px solid #e0e0e0', marginTop: 4, paddingTop: 6 }}>
-            <span>定格容量</span><span>{a.capacity.ratedKVA} kVA</span>
-          </div>
-          <div style={detailRow}><span>利用率</span><span>{a.capacity.utilization}%</span></div>
-          <div style={{ ...detailRow, borderBottom: 'none' }}>
-            <span>推奨容量</span>
-            <span style={{ color: a.capacity.recommendedKVA !== a.capacity.ratedKVA ? '#e65100' : 'inherit', fontWeight: a.capacity.recommendedKVA !== a.capacity.ratedKVA ? 600 : 400 }}>
-              {a.capacity.recommendedKVA} kVA
-              {a.capacity.recommendedKVA < a.capacity.ratedKVA && ' (現在より小さい容量で可)'}
-              {a.capacity.recommendedKVA > a.capacity.ratedKVA && ' (容量不足)'}
-            </span>
-          </div>
-        </div>
-      )}
-
-      {/* カード5: 不平衡率 (§19-7) */}
-      {a?.unbalance && (
-        <div style={cardStyle}>
-          <div style={{ ...secTitle(), display: 'flex', alignItems: 'center', gap: 6 }}>
-            不平衡率
-            <Badge ok={a.unbalance.ok} label={a.unbalance.ok ? 'OK' : 'NG'} />
-            {hFor('unbalance')}
-          </div>
-          {['R-S', 'S-T', 'T-R'].map(ph => {
-            const kva = a.unbalance.phaseLoads[ph];
-            const maxVal = Math.max(a.unbalance.maxPhase, 0.1);
-            const pct = maxVal > 0 ? kva / maxVal * 100 : 0;
-            const colors = { 'R-S': '#e53935', 'S-T': '#1e88e5', 'T-R': '#43a047' };
-            return (
-              <div key={ph} style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 6 }}>
-                <span style={{ width: 32, fontSize: 12, fontWeight: 600, color: colors[ph] }}>{ph}</span>
-                <div style={{ flex: 1, background: '#f5f5f5', borderRadius: 3, height: 16, overflow: 'hidden' }}>
-                  <div style={{ width: pct + '%', background: colors[ph], height: '100%', borderRadius: 3, transition: 'width 0.3s' }} />
-                </div>
-                <span style={{ width: 70, fontSize: 12, textAlign: 'right' }}>{kva} kVA</span>
-              </div>
-            );
-          })}
-          <div style={{ ...detailRow, marginTop: 8 }}>
-            <span>不平衡率</span><span>{a.unbalance.unbalanceRate}%</span>
-          </div>
-          <div style={detailRow}>
-            <span>単相負荷合計</span>
-            <span>
-              {a.unbalance.singlePhaseTotal} / {a.unbalance.singlePhaseLimit} kVA
-              {' '}
-              <span style={{ color: a.unbalance.singlePhaseOK ? '#2e7d32' : '#c62828', fontWeight: 600 }}>
-                {a.unbalance.singlePhaseOK ? 'OK' : 'NG'}
-              </span>
-            </span>
-          </div>
-          {a.unbalance.unassigned.length > 0 && (
-            <div style={{ fontSize: 11, color: '#e65100', marginTop: 6, padding: '4px 8px', background: '#fff3e0', borderRadius: 4 }}>
-              相未割当: {a.unbalance.unassigned.map(u => u.name + ' (' + u.kva + 'kVA)').join(', ')}
-            </div>
-          )}
-        </div>
-      )}
-
-      {/* カード6: 電圧変動率 (§19-8) */}
-      {a?.voltageRegulation && (
-        <div style={cardStyle}>
-          <div style={{ ...secTitle(), display: 'flex', alignItems: 'center', gap: 6 }}>
-            電圧変動率
-            <Badge ok={a.voltageRegulation.ok} label={a.voltageRegulation.ok ? 'OK' : 'NG'} />
-            {hFor('voltageReg')}
-          </div>
-          <div style={detailRow}>
-            <span>電圧変動率 ε</span><span>{a.voltageRegulation.epsilon}%</span>
-          </div>
-          <div style={detailRow}>
-            <span>二次電圧（負荷時）</span><span>{a.voltageRegulation.secondaryVoltageAtLoad} V</span>
-          </div>
-          <div style={{ ...detailRow, fontSize: 11, color: '#888' }}>
-            <span>p = %R × k</span><span>{a.voltageRegulation.p}</span>
-          </div>
-          <div style={{ ...detailRow, fontSize: 11, color: '#888' }}>
-            <span>q = %X × k</span><span>{a.voltageRegulation.q}</span>
-          </div>
-          <div style={{ ...detailRow, fontSize: 11, color: '#888', borderBottom: 'none' }}>
-            <span>加重平均力率</span><span>{a.voltageRegulation.cosTheta}</span>
-          </div>
-        </div>
-      )}
-
-      {/* カード7: 損失・効率 (§19-9) */}
-      {a?.losses && (
-        <div style={cardStyle}>
-          <div style={secTitle()}>損失・効率</div>
-          <div style={detailRow}><span>無負荷損 Wi</span><span>{a.losses.wi} W</span></div>
-          <div style={detailRow}><span>負荷損 Wc × k²</span><span>{a.losses.copperLoss} W</span></div>
-          <div style={{ ...detailRow, fontWeight: 600 }}><span>合計損失</span><span>{a.losses.totalLoss} W</span></div>
-          <div style={{ ...detailRow, borderTop: '1px solid #e0e0e0', marginTop: 4, paddingTop: 6 }}>
-            <span>効率</span><span>{a.losses.efficiency}%</span>
-          </div>
-          <div style={detailRow}>
-            <span>最高効率負荷率</span><span>{a.losses.optimalLoadRatio}%</span>
-          </div>
-          <div style={detailRow}>
-            <span>現在負荷率</span><span>{a.losses.loadRatio}%</span>
-          </div>
-          {a.losses.annualLossKWh != null && (
-            <div style={{ ...detailRow, borderBottom: 'none' }}>
-              <span>年間損失</span><span>{a.losses.annualLossKWh.toLocaleString()} kWh/年</span>
-            </div>
-          )}
-        </div>
-      )}
-
-      {/* カード8: 励磁突入電流 (§19-10) */}
+      {/* 励磁突入電流 — フルwidth */}
       {a?.inrush && (
         <div style={cardStyle}>
-          <div style={secTitle()}>励磁突入電流</div>
-          <div style={detailRow}><span>定格電流 In</span><span>{a.inrush.In} A</span></div>
-          <div style={detailRow}><span>突入倍率</span><span>×{a.inrush.multiplier}</span></div>
-          <div style={{ ...detailRow, fontWeight: 600 }}><span>ピーク電流</span><span>{a.inrush.peakCurrent.toLocaleString()} A</span></div>
-          <div style={detailRow}><span>減衰時間</span><span>約 {a.inrush.duration_ms} ms</span></div>
-          <div style={{ fontSize: 11, color: '#888', marginTop: 4 }}>
-            {a.inrush.note}
+          <div style={{ display: 'flex', gap: 16, alignItems: 'baseline' }}>
+            <div style={secTitle()}>励磁突入電流</div>
+            <div style={{ display: 'flex', gap: 16, fontSize: 12, color: '#555' }}>
+              <span>In: {a.inrush.In} A</span>
+              <span>突入倍率: ×{a.inrush.multiplier}</span>
+              <span style={{ fontWeight: 600 }}>ピーク: {a.inrush.peakCurrent.toLocaleString()} A</span>
+              <span>減衰: 約 {a.inrush.duration_ms} ms</span>
+            </div>
           </div>
         </div>
       )}
@@ -7226,8 +7237,8 @@ function App() {
                           {activeResult.vdOK != null && (
                             <span style={{
                               padding: '1px 6px', borderRadius: 3, fontSize: 10, fontWeight: 600,
-                              color: '#fff', background: activeResult.vdOK ? '#4caf50' : '#f44336'
-                            }}>電圧降下</span>
+                              color: '#fff', background: (activeResult.pathVdOK != null ? activeResult.pathVdOK : activeResult.vdOK) ? '#4caf50' : '#f44336'
+                            }}>{activeResult.vdOK && activeResult.pathVdOK === false ? '累積VD' : '電圧降下'}</span>
                           )}
                           {activeResult.protOK != null && (
                             <span style={{
