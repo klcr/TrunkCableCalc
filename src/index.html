@@ -124,9 +124,23 @@ function buildTree(nodes) {
 
 function validateNode(nodes, node) {
   const depth = node.parentId ? getDepth(nodes, node.parentId) + 1 : 0;
-  if (depth > 3) return 'depth exceeds 3';
-  if (node.type === 'transformer' && depth !== 0) return 'transformer must be root';
-  if (node.type === 'trunk' && depth < 1 && nodes.some(n => n.type === 'transformer')) return 'trunk must be under transformer';
+  if (depth > 5) return 'depth exceeds 5';
+  if (node.type === 'transformer') {
+    const cat = node.transformer?.category || 'hv';
+    if (cat === 'hv' && depth !== 0) return 'HV transformer must be root';
+    if (cat === 'lv') {
+      if (depth < 1) return 'LV transformer must be under trunk';
+      const parent = node.parentId ? nodes.find(n => n.id === node.parentId) : null;
+      if (!parent || parent.type !== 'trunk') return 'LV transformer must be under trunk';
+    }
+  }
+  if (node.type === 'trunk') {
+    if (depth < 1 && nodes.some(n => n.type === 'transformer')) return 'trunk must be under transformer';
+    if (depth >= 1) {
+      const parent = node.parentId ? nodes.find(n => n.id === node.parentId) : null;
+      if (parent && parent.type !== 'trunk' && parent.type !== 'transformer') return 'trunk must be under transformer or trunk';
+    }
+  }
   if (node.type === 'load') {
     const parent = node.parentId ? nodes.find(n => n.id === node.parentId) : null;
     if (!parent || parent.type !== 'trunk') return 'load must be under trunk';
@@ -530,10 +544,14 @@ function runParentCalc(children, cfg) {
 /**
  * calcTransformer — 変圧器ノードの計算 (§19-3)
  */
+function isThreePhaseTransformer(trType) {
+  return trType !== '単相油入' && trType !== '低圧単相';
+}
+
 function calcTransformer(tr) {
   const S = tr.capacity_kVA * 1000;
   const Vs = tr.secondaryV;
-  const threePhase = tr.trType !== '単相油入';
+  const threePhase = isThreePhaseTransformer(tr.trType);
   let Rs, Xs;
   if (tr.xrRatio != null && tr.xrRatio > 0) {
     const pctR = tr.pctZ / Math.sqrt(1 + tr.xrRatio * tr.xrRatio);
@@ -547,7 +565,7 @@ function calcTransformer(tr) {
   const Zs = Math.sqrt(Rs * Rs + Xs * Xs);
   const In = threePhase ? S / (Math.sqrt(3) * Vs) : S / Vs;
   const Isc3 = threePhase ? Vs / (Math.sqrt(3) * Zs) : Vs / Zs;
-  return { Rs, Xs, Zs, In, Isc3, pctZ: tr.pctZ, capacity_kVA: tr.capacity_kVA, threePhase };
+  return { Rs, Xs, Zs, In, Isc3, pctZ: tr.pctZ, capacity_kVA: tr.capacity_kVA, threePhase, category: tr.category || 'hv' };
 }
 
 /* === TRANSFORMER ANALYSIS HELPERS (§19-6〜19-10) === */
@@ -575,10 +593,13 @@ function mapToLinePhase(phase) {
   return map[phase] || [['R-S', 1/3], ['S-T', 1/3], ['T-R', 1/3]];
 }
 
-/** getAutoLoss — 損失データ自動取得 (§19-9a) */
+/** getAutoLoss — 損失データ自動取得 (§19-9a, §19-11d) */
 function getAutoLoss(tr) {
   const key = String(tr.capacity_kVA);
-  const typeMap = { '三相油入': 'three_phase_oil', '単相油入': 'single_phase_oil', 'モールド': 'mold' };
+  const typeMap = {
+    '三相油入': 'three_phase_oil', '単相油入': 'single_phase_oil', 'モールド': 'mold',
+    '低圧三相': 'lv_three_phase', '低圧単相': 'lv_single_phase', '低圧乾式': 'lv_three_phase', '低圧モールド': 'lv_three_phase'
+  };
   const d = TR_RATINGS[typeMap[tr.trType]]?.data[key];
   return { wi_W: d?.wi_W || 0, wc_W: d?.wc_W || 0 };
 }
@@ -619,8 +640,11 @@ function calcComposedPF(nodes, trNodeId) {
 function calcTransformerAnalysis(tr, nodes, nodeId, allResults) {
   const analysis = {};
   const allLoads = getDescendants(nodes, nodeId).filter(n => n.type === 'load');
-  const threePhase = tr.trType !== '単相油入';
-  const typeMap = { '三相油入': 'three_phase_oil', '単相油入': 'single_phase_oil', 'モールド': 'mold' };
+  const threePhase = isThreePhaseTransformer(tr.trType);
+  const typeMap = {
+    '三相油入': 'three_phase_oil', '単相油入': 'single_phase_oil', 'モールド': 'mold',
+    '低圧三相': 'lv_three_phase', '低圧単相': 'lv_single_phase', '低圧乾式': 'lv_three_phase', '低圧モールド': 'lv_three_phase'
+  };
   const trTypeKey = typeMap[tr.trType] || 'three_phase_oil';
 
   /* === A. 容量検討 (§19-6) === */
@@ -768,12 +792,28 @@ function calcTransformerAnalysis(tr, nodes, nodeId, allResults) {
  */
 function aggregateCurrents(nodes, trunkId, allResults) {
   const children = getChildren(nodes, trunkId);
+  const trunk = nodes.find(n => n.id === trunkId);
+  const parentV = trunk?.trunk?.voltage || 210;
   let sumIM = 0, sumIH = 0;
   for (const child of children) {
     if (child.type === 'trunk') {
       const sub = aggregateCurrents(nodes, child.id, allResults);
       sumIM += sub.sumIM;
       sumIH += sub.sumIH;
+    } else if (child.type === 'transformer' && child.transformer?.category === 'lv') {
+      /* LV/LV TR: 配下負荷を kVA ベースで集約し、親側電圧で電流に変換 (§19-14) */
+      const lvTr = child.transformer;
+      const secV = lvTr.secondaryV || 210;
+      const lvLoads = getDescendants(nodes, child.id).filter(n => n.type === 'load');
+      let lvKVA = 0;
+      for (const l of lvLoads) {
+        const r = allResults[l.id];
+        if (r) lvKVA += convertToKVA(r, l.load);
+      }
+      const df = (lvTr.diversityFactor || 100) / 100;
+      const lvI = lvKVA * df * 1000 / (Math.sqrt(3) * parentV);
+      /* LV TR 配下は一般負荷として扱う（電動機判定は親側では不要） */
+      sumIH += lvI;
     } else if (child.type === 'load') {
       const r = allResults[child.id];
       if (!r) continue;
@@ -932,7 +972,14 @@ function runTrunkCalc(trunk, agg, opts) {
  */
 function calcCumulativeVd(nodes, nodeId, parentCumVd, allResults) {
   const r = allResults[nodeId];
-  const cumVd = parentCumVd + (r && r.vd ? r.vd : 0);
+  const node = nodes.find(n => n.id === nodeId);
+  let cumVd = parentCumVd + (r && r.vd ? r.vd : 0);
+  /* LV/LV transformer: 電圧変動率 ε を累積VDに加算 (§19-13) */
+  if (node && node.type === 'transformer' && node.transformer?.category === 'lv' && r && r.analysis) {
+    const eps = r.analysis.voltageRegulation?.epsilon || 0;
+    const Vs = node.transformer.secondaryV || 210;
+    cumVd = parentCumVd + eps * Vs / 100;
+  }
   if (r) {
     r.cumulativeVd = rd(cumVd);
     const bV = r.baseV || (r.allowVdPercent && r.allowVd ? r.allowVd / r.allowVdPercent * 100 : 0);
@@ -1014,21 +1061,33 @@ function propagateFault(nodes, nodeId, Rcum, Xcum, Vs, allResults) {
     r.Isc3 = Vs / (Math.sqrt(3) * r.Zcum);
   }
   for (const child of getChildren(nodes, nodeId)) {
-    let Rc = 0, Xc = 0;
-    if (child.type === 'trunk' || child.type === 'load') {
-      const cfg = child.type === 'trunk' ? child.trunk : child.load;
-      const childR = allResults[child.id];
-      if (childR && childR.size) {
-        const imp = getImpedance(cfg.cableType, cfg.freq, childR.size);
-        if (imp) {
-          const Lkm = cfg.cableLength / 1000;
-          const par = childR.parallel || 1;
-          Rc = imp[0] * Lkm / par;
-          Xc = imp[1] * Lkm / par;
+    if (child.type === 'transformer' && (child.transformer?.category === 'lv')) {
+      /* LV/LV transformer: 電圧比変換 + TR自身のインピーダンス加算 (§19-12) */
+      const lvTr = child.transformer;
+      const lvR = allResults[child.id];
+      if (lvR) {
+        const ratio = Math.pow(lvTr.secondaryV / lvTr.primaryV, 2);
+        const Rcum2 = Rcum * ratio + lvR.Rs;
+        const Xcum2 = Xcum * ratio + lvR.Xs;
+        propagateFault(nodes, child.id, Rcum2, Xcum2, lvTr.secondaryV, allResults);
+      }
+    } else {
+      let Rc = 0, Xc = 0;
+      if (child.type === 'trunk' || child.type === 'load') {
+        const cfg = child.type === 'trunk' ? child.trunk : child.load;
+        const childR = allResults[child.id];
+        if (childR && childR.size) {
+          const imp = getImpedance(cfg.cableType, cfg.freq, childR.size);
+          if (imp) {
+            const Lkm = cfg.cableLength / 1000;
+            const par = childR.parallel || 1;
+            Rc = imp[0] * Lkm / par;
+            Xc = imp[1] * Lkm / par;
+          }
         }
       }
+      propagateFault(nodes, child.id, Rcum + Rc, Xcum + Xc, Vs, allResults);
     }
-    propagateFault(nodes, child.id, Rcum + Rc, Xcum + Xc, Vs, allResults);
   }
 }
 
@@ -1093,7 +1152,7 @@ function calcGroundingResistance(Ig, vcbTripTime_s) {
 }
 
 /**
- * findAncestorTransformer — ノードの祖先変圧器を取得
+ * findAncestorTransformer — ノードの祖先変圧器を取得（最近接）
  */
 function findAncestorTransformer(nodes, nodeId) {
   let current = nodes.find(n => n.id === nodeId);
@@ -1102,6 +1161,20 @@ function findAncestorTransformer(nodes, nodeId) {
     current = current.parentId ? nodes.find(n => n.id === current.parentId) : null;
   }
   return null;
+}
+
+/**
+ * findRootTransformer — ノードのルート変圧器（HV/LV）を取得
+ * LV/LV変圧器をスキップし、ツリーの root HV 変圧器を返す
+ */
+function findRootTransformer(nodes, nodeId) {
+  let current = nodes.find(n => n.id === nodeId);
+  let lastTr = null;
+  while (current) {
+    if (current.type === 'transformer') lastTr = current;
+    current = current.parentId ? nodes.find(n => n.id === current.parentId) : null;
+  }
+  return lastTr;
 }
 
 /**
@@ -1122,7 +1195,7 @@ function calcLVGroundFault(node, allResults, nodes) {
   const Z0_R = Z1_R * zeroRatio.R0_R1;
   const Z0_X = Z1_X * (zeroRatio.X0_X1_typical || zeroRatio.X0_X1 || 4.0);
 
-  const tr = findAncestorTransformer(nodes, node.id);
+  const tr = findRootTransformer(nodes, node.id);
   if (!tr) return null;
   const connection = tr.transformer.connection || 'Δ-Y';
   const connMap = { 'Δ-Y': 'Dyn', 'Y-Y': 'Yyn', 'Δ-Δ': 'Dd', 'Y-Δ': 'Dd', 'V-V': 'Dyn' };
@@ -1725,17 +1798,20 @@ const MOD = {
 
 /* === DIAGRAM: SYMBOLS (M2-4-3) === */
 
-function SvgTransformer({ x, y, w, h, connection }) {
+function SvgTransformer({ x, y, w, h, connection, isLV }) {
   const r = Math.min(w, h) * 0.22;
   const cx = x + w / 2, cy = y + h / 2;
   const [pri, sec] = (connection || 'Δ-Y').split('-');
+  const fillColor = isLV ? '#e0f2f1' : '#f3e5f5';
+  const strokeColor = isLV ? '#00695c' : '#7b1fa2';
   return (
     <g>
-      <rect x={x} y={y} width={w} height={h} rx={4} fill="#f3e5f5" stroke="#7b1fa2" strokeWidth={1.5} />
+      <rect x={x} y={y} width={w} height={h} rx={4} fill={fillColor} stroke={strokeColor} strokeWidth={1.5} />
       <circle cx={cx - r * 0.5} cy={cy} r={r} fill="none" stroke="#333" strokeWidth={1.5} />
       <circle cx={cx + r * 0.5} cy={cy} r={r} fill="none" stroke="#333" strokeWidth={1.5} />
       <text x={cx - r * 0.5} y={cy - r - 4} fontSize={9} textAnchor="middle" fill="#555">{pri}</text>
       <text x={cx + r * 0.5} y={cy - r - 4} fontSize={9} textAnchor="middle" fill="#555">{sec}</text>
+      {isLV && <text x={x + 4} y={y + 12} fontSize={8} fill={strokeColor} fontWeight={700}>LV</text>}
     </g>
   );
 }
@@ -2193,7 +2269,7 @@ function ModuleTransformer({ node, result, canvas, selected, mode, direction, on
     <g style={{ cursor: 'grab' }}
        onMouseDown={onMouseDown}
        onClick={onClick}>
-      <SvgTransformer x={x} y={y} w={w} h={h} connection={tr.connection} />
+      <SvgTransformer x={x} y={y} w={w} h={h} connection={tr.connection} isLV={tr.category === 'lv'} />
       {selected && <rect x={x - 2} y={y - 2} width={w + 4} height={h + 4} rx={6} fill="none" stroke="#1976d2" strokeWidth={2} strokeDasharray="4 2" />}
       <text x={x + w / 2} y={y - 6} fontSize={10} textAnchor="middle" fontWeight={700} fill="#333">{tr.name || 'TR'}</text>
       <text x={x + w / 2} y={y + h + 12} fontSize={8} textAnchor="middle" fill="#666">
@@ -2433,8 +2509,8 @@ function DiagramCanvas({ nodes, allResults, systemMeta, selectedId, onSelectNode
             (fromNode.type === 'trunk' && !nodes.some(c => c.parentId === fromNode.id && c.type === 'trunk'))
           );
           const isFeedLinkTarget = hoverNode.type === 'trunk';
-          const fromAnc = findAncestorTransformer(nodes, wiring.fromId);
-          const toAnc = findAncestorTransformer(nodes, hoverNode.id);
+          const fromAnc = findRootTransformer(nodes, wiring.fromId);
+          const toAnc = findRootTransformer(nodes, hoverNode.id);
           const isDifferentTree = !(fromAnc && toAnc && fromAnc.id === toAnc.id);
           /* feedLink 接続可能 or 通常親子接続可能かを判定 */
           const canFeedLink = isFeedLinkSource && isFeedLinkTarget && isDifferentTree;
@@ -2478,8 +2554,8 @@ function DiagramCanvas({ nodes, allResults, systemMeta, selectedId, onSelectNode
             (fromNode.type === 'trunk' && !nodes.some(c => c.parentId === fromNode.id && c.type === 'trunk'))
           );
           const isFeedLinkTarget = target.type === 'trunk';
-          const fromAnc = findAncestorTransformer(nodes, wiring.fromId);
-          const toAnc = findAncestorTransformer(nodes, target.id);
+          const fromAnc = findRootTransformer(nodes, wiring.fromId);
+          const toAnc = findRootTransformer(nodes, target.id);
           const isDifferentTree = !(fromAnc && toAnc && fromAnc.id === toAnc.id);
 
           if (isFeedLinkSource && isFeedLinkTarget && isDifferentTree && onAddFeedLink) {
@@ -2921,7 +2997,7 @@ const DEFAULT_PARAMS = {
 /* --- 変圧器デフォルト (§19) --- */
 const DEFAULT_TR_PARAMS = {
   name: 'TR-1', trType: '三相油入', capacity_kVA: 500,
-  primaryV: 6600, secondaryV: 210,
+  primaryV: 6600, secondaryV: 210, category: 'hv',
   pctZ: 4.00, xrRatio: 2.98, connection: 'Δ-Y', pctZAuto: true,
   wi_W: null, wc_W: null, lossAuto: true,
   diversityFactor: 100, annualLoadFactor: null,
@@ -2932,6 +3008,16 @@ const DEFAULT_TR_PARAMS = {
     capacitance_uF_per_km: null, /* number | null */
     vcbTripTime_s: 1.0          /* VCB 遮断時間 [s]（B種接地計算用） */
   }
+};
+
+/* --- LV/LV変圧器デフォルト (§19-11) --- */
+const DEFAULT_LV_TR_PARAMS = {
+  name: 'LV-TR-1', trType: '低圧三相', capacity_kVA: 10,
+  primaryV: 210, secondaryV: 105, category: 'lv',
+  pctZ: 2.40, xrRatio: 0.60, connection: 'Y-Y', pctZAuto: true,
+  wi_W: null, wc_W: null, lossAuto: true,
+  diversityFactor: 100, annualLoadFactor: null,
+  hvSystem: { cableType: null, cableSize_mm2: null, totalCableLength_km: null, capacitance_uF_per_km: null, vcbTripTime_s: 1.0 }
 };
 
 /* --- 幹線デフォルト (§9) --- */
@@ -4276,11 +4362,13 @@ function TransformerResultPanel({ result, nodes, nodeId, allResults }) {
   if (!result) return null;
   const r = result;
   const a = r.analysis;
+  const isLV = r.category === 'lv';
+  const accentColor = isLV ? '#00695c' : '#1976d2';
   const cardStyle = { background: '#fff', border: '1px solid #e0e0e0', borderRadius: 8, padding: '10px 12px', marginBottom: 8 };
   const dtStyle = { fontSize: 11, color: '#888', marginBottom: 1 };
   const ddStyle = { fontSize: 16, fontWeight: 700, marginBottom: 4 };
   const detailRow = { display: 'flex', justifyContent: 'space-between', fontSize: 12, padding: '2px 0', borderBottom: '1px solid #f5f5f5' };
-  const secTitle = (text) => ({ fontSize: 12, fontWeight: 700, marginBottom: 6, color: '#1976d2' });
+  const secTitle = (text) => ({ fontSize: 12, fontWeight: 700, marginBottom: 6, color: accentColor });
   const gridStyle = { display: 'grid', gridTemplateColumns: 'repeat(3, 1fr)', gap: 8 };
 
   const utilization = a?.capacity?.utilization || 0;
@@ -4434,8 +4522,8 @@ function TransformerResultPanel({ result, nodes, nodeId, allResults }) {
           </div>
         )}
 
-        {/* 接地設計 */}
-        {r.groundFault && (
+        {/* 接地設計 — HV TR のみ表示 */}
+        {r.groundFault && !isLV && (
           <div style={cardStyle}>
             <div style={{ ...secTitle(), display: 'flex', alignItems: 'center', gap: 4 }}>接地設計{hFor('ground')}</div>
             <div style={detailRow}><span>地絡電流 Ig</span><span>{r.groundFault.Ig} A</span></div>
@@ -4476,10 +4564,14 @@ function TransformerResultPanel({ result, nodes, nodeId, allResults }) {
 
 /* --- TransformerForm 変圧器入力フォーム (§19-1) --- */
 function TransformerForm({ trParams, setTrParams, onSave, onCancel, isEdit }) {
+  const isLV = trParams.category === 'lv';
+
   const getCapacities = (trType) => {
     if (trType === '三相油入') return TR_RATINGS.three_phase_oil.capacities_kVA;
     if (trType === '単相油入') return TR_RATINGS.single_phase_oil.capacities_kVA;
     if (trType === 'モールド') return TR_RATINGS.mold.capacities_kVA;
+    if (trType === '低圧三相' || trType === '低圧乾式' || trType === '低圧モールド') return TR_RATINGS.lv_three_phase?.capacities_kVA || [1, 2, 3, 5, 7.5, 10, 15, 20, 30, 50, 75, 100];
+    if (trType === '低圧単相') return TR_RATINGS.lv_single_phase?.capacities_kVA || [0.5, 1, 2, 3, 5, 7.5, 10, 15, 20, 30, 50];
     return TR_RATINGS.three_phase_oil.capacities_kVA;
   };
 
@@ -4497,7 +4589,36 @@ function TransformerForm({ trParams, setTrParams, onSave, onCancel, isEdit }) {
       const d = TR_RATINGS.mold.data[key];
       return { pctZ: d.pct_z_min, xrRatio: null };
     }
+    if ((trType === '低圧三相' || trType === '低圧乾式' || trType === '低圧モールド') && TR_RATINGS.lv_three_phase?.data[key]) {
+      const d = TR_RATINGS.lv_three_phase.data[key];
+      return { pctZ: d.pct_z, xrRatio: d.xr_ratio };
+    }
+    if (trType === '低圧単相' && TR_RATINGS.lv_single_phase?.data[key]) {
+      const d = TR_RATINGS.lv_single_phase.data[key];
+      return { pctZ: d.pct_z, xrRatio: d.xr_ratio };
+    }
     return { pctZ: 4.00, xrRatio: null };
+  };
+
+  const handleCategoryChange = (cat) => {
+    if (cat === 'lv') {
+      const dflt = DEFAULT_LV_TR_PARAMS;
+      const auto = getAutoValues(dflt.trType, dflt.capacity_kVA);
+      setTrParams(p => ({
+        ...p, category: 'lv', trType: dflt.trType, capacity_kVA: dflt.capacity_kVA,
+        primaryV: p.primaryV <= 440 ? p.primaryV : dflt.primaryV, secondaryV: dflt.secondaryV,
+        connection: dflt.connection, pctZAuto: true, pctZ: auto.pctZ, xrRatio: auto.xrRatio,
+        hvSystem: { cableType: null, cableSize_mm2: null, totalCableLength_km: null, capacitance_uF_per_km: null, vcbTripTime_s: 1.0 }
+      }));
+    } else {
+      const dflt = DEFAULT_TR_PARAMS;
+      const auto = getAutoValues(dflt.trType, dflt.capacity_kVA);
+      setTrParams(p => ({
+        ...p, category: 'hv', trType: dflt.trType, capacity_kVA: dflt.capacity_kVA,
+        primaryV: dflt.primaryV, secondaryV: dflt.secondaryV,
+        connection: dflt.connection, pctZAuto: true, pctZ: auto.pctZ, xrRatio: auto.xrRatio
+      }));
+    }
   };
 
   const handleTypeChange = (val) => {
@@ -4521,17 +4642,39 @@ function TransformerForm({ trParams, setTrParams, onSave, onCancel, isEdit }) {
 
   const capacities = getCapacities(trParams.trType);
 
+  /* LV/LV: 一次電圧より低い二次電圧のみ選択可能 */
+  const lvPrimaryVoltages = [105, 200, 210, 400, 420, 440];
+  const lvSecondaryVoltages = [100, 105, 200, 210, 400, 420].filter(v => v < trParams.primaryV);
+
   return (
     <div>
       <Sec title="変圧器情報">
+        <RC label="カテゴリ">
+          <div style={{ display: 'flex', gap: 8 }}>
+            <label style={{ fontSize: 13, display: 'flex', alignItems: 'center', gap: 4 }}>
+              <input type="radio" name="trCategory" value="hv" checked={!isLV}
+                onChange={() => handleCategoryChange('hv')} /> 高圧/低圧 (HV)
+            </label>
+            <label style={{ fontSize: 13, display: 'flex', alignItems: 'center', gap: 4 }}>
+              <input type="radio" name="trCategory" value="lv" checked={isLV}
+                onChange={() => handleCategoryChange('lv')} /> 低圧/低圧 (LV)
+            </label>
+          </div>
+        </RC>
         <RC label="変圧器名称">
           <input type="text" value={trParams.name} style={{ ...numStyle, textAlign: 'left' }}
             onChange={e => setTrParams(p => ({ ...p, name: e.target.value }))} />
         </RC>
         <RC label="種別">
-          <select value={trParams.trType} style={selStyle} onChange={e => handleTypeChange(e.target.value)}>
-            <option>三相油入</option><option>単相油入</option><option>モールド</option>
-          </select>
+          {isLV ? (
+            <select value={trParams.trType} style={selStyle} onChange={e => handleTypeChange(e.target.value)}>
+              <option>低圧三相</option><option>低圧単相</option><option>低圧乾式</option><option>低圧モールド</option>
+            </select>
+          ) : (
+            <select value={trParams.trType} style={selStyle} onChange={e => handleTypeChange(e.target.value)}>
+              <option>三相油入</option><option>単相油入</option><option>モールド</option>
+            </select>
+          )}
         </RC>
         <RC label="容量 [kVA]">
           <select value={trParams.capacity_kVA} style={selStyle} onChange={e => handleCapacityChange(e.target.value)}>
@@ -4539,14 +4682,32 @@ function TransformerForm({ trParams, setTrParams, onSave, onCancel, isEdit }) {
           </select>
         </RC>
         <RC label="一次電圧 [V]">
-          <select value={trParams.primaryV} style={selStyle} onChange={e => setTrParams(p => ({ ...p, primaryV: Number(e.target.value) }))}>
-            <option value={3300}>3300</option><option value={6600}>6600</option>
-          </select>
+          {isLV ? (
+            <select value={trParams.primaryV} style={selStyle} onChange={e => {
+              const v = Number(e.target.value);
+              setTrParams(p => ({
+                ...p, primaryV: v,
+                secondaryV: p.secondaryV < v ? p.secondaryV : Math.min(...[100, 105, 200, 210, 400, 420].filter(sv => sv < v))
+              }));
+            }}>
+              {lvPrimaryVoltages.map(v => <option key={v} value={v}>{v}</option>)}
+            </select>
+          ) : (
+            <select value={trParams.primaryV} style={selStyle} onChange={e => setTrParams(p => ({ ...p, primaryV: Number(e.target.value) }))}>
+              <option value={3300}>3300</option><option value={6600}>6600</option>
+            </select>
+          )}
         </RC>
         <RC label="二次電圧 [V]">
-          <select value={trParams.secondaryV} style={selStyle} onChange={e => setTrParams(p => ({ ...p, secondaryV: Number(e.target.value) }))}>
-            <option value={100}>100</option><option value={105}>105</option><option value={200}>200</option><option value={210}>210</option><option value={400}>400</option><option value={415}>415</option><option value={420}>420</option><option value={440}>440</option>
-          </select>
+          {isLV ? (
+            <select value={trParams.secondaryV} style={selStyle} onChange={e => setTrParams(p => ({ ...p, secondaryV: Number(e.target.value) }))}>
+              {lvSecondaryVoltages.map(v => <option key={v} value={v}>{v}</option>)}
+            </select>
+          ) : (
+            <select value={trParams.secondaryV} style={selStyle} onChange={e => setTrParams(p => ({ ...p, secondaryV: Number(e.target.value) }))}>
+              <option value={100}>100</option><option value={105}>105</option><option value={200}>200</option><option value={210}>210</option><option value={400}>400</option><option value={415}>415</option><option value={420}>420</option><option value={440}>440</option>
+            </select>
+          )}
         </RC>
         <RC label="%Z">
           <div style={{ display: 'flex', gap: 6, alignItems: 'center' }}>
@@ -4631,7 +4792,7 @@ function TransformerForm({ trParams, setTrParams, onSave, onCancel, isEdit }) {
           );
         })()}
       </Sec>
-      <Sec title="高圧系統（受電側）">
+      {!isLV && <Sec title="高圧系統（受電側）">
         <RC label="HV ケーブル種別">
           <select value={trParams.hvSystem?.cableType || ''} style={selStyle}
             onChange={e => {
@@ -4675,12 +4836,12 @@ function TransformerForm({ trParams, setTrParams, onSave, onCancel, isEdit }) {
             <option value={2.0}>2.0 秒以内</option>
           </select>
         </RC>
-      </Sec>
+      </Sec>}
       <div style={{ display: 'flex', gap: 8 }}>
         <button onClick={onSave} style={{
           flex: 1, padding: '10px', borderRadius: 6, border: 'none',
-          background: '#1976d2', color: '#fff', fontSize: 14, fontWeight: 700, cursor: 'pointer'
-        }}>{isEdit ? '更新' : '+ 変圧器登録'}</button>
+          background: isLV ? '#00695c' : '#1976d2', color: '#fff', fontSize: 14, fontWeight: 700, cursor: 'pointer'
+        }}>{isEdit ? '更新' : (isLV ? '+ LV変圧器登録' : '+ 変圧器登録')}</button>
         {isEdit && (
           <button onClick={onCancel} style={{
             padding: '10px 16px', borderRadius: 6, border: '1px solid #ccc',
@@ -4908,13 +5069,14 @@ function TreeTable({ nodes, allResults, selectedId, selectedIds, onSelect, onDel
     const r = allResults[node.id];
     const isSelected = node.id === selectedId;
     const isTr = node.type === 'transformer';
+    const isLvTr = isTr && node.transformer?.category === 'lv';
     const isTrunk = node.type === 'trunk';
-    const bgColor = isSelected ? '#e3f2fd' : isTr ? '#e8eaf6' : isTrunk ? '#f5f5f5' : '#fff';
-    const tag = isTr ? '[TR]' : isTrunk ? '[主幹]' : '└';
+    const bgColor = isSelected ? '#e3f2fd' : isLvTr ? '#e0f2f1' : isTr ? '#e8eaf6' : isTrunk ? '#f5f5f5' : '#fff';
+    const tag = isLvTr ? '[LV-TR]' : isTr ? '[TR]' : isTrunk ? '[主幹]' : '└';
     const name = isTr ? (node.transformer?.name || 'TR')
       : isTrunk ? (node.trunk?.name || '幹線')
       : (node.load?.loadName || '負荷');
-    const sysV = isTr ? `${node.transformer?.secondaryV || ''}V`
+    const sysV = isTr ? (isLvTr ? `${node.transformer?.primaryV || ''}/${node.transformer?.secondaryV || ''}V` : `${node.transformer?.secondaryV || ''}V`)
       : isTrunk ? `${node.trunk?.system || ''} ${node.trunk?.voltage || ''}V`
       : `${node.load?.system || ''} ${node.load?.voltage || ''}V`;
     const cType = isTrunk ? (node.trunk?.cableType || '') : (node.load?.cableType || '');
@@ -5078,9 +5240,15 @@ function TreeTable({ nodes, allResults, selectedId, selectedIds, onSelect, onDel
             ) : '-'}
           </td>
           <td style={{ padding: '6px 2px', whiteSpace: 'nowrap' }}>
-            {(isTr || (isTrunk && depth < 2)) && onAddChild && (
+            {(isTr || isTrunk) && onAddChild && (
               <button onClick={e => { e.stopPropagation(); onAddChild(node); }}
-                style={{ border: 'none', background: 'none', color: '#1976d2', cursor: 'pointer', fontSize: 14, padding: '2px 6px', fontWeight: 700 }}>+</button>
+                style={{ border: 'none', background: 'none', color: '#1976d2', cursor: 'pointer', fontSize: 14, padding: '2px 6px', fontWeight: 700 }}
+                title={isTrunk ? '子回路を追加' : '幹線を追加'}>+</button>
+            )}
+            {isTrunk && onAddChild && (
+              <button onClick={e => { e.stopPropagation(); onAddChild(node, 'lv_transformer'); }}
+                style={{ border: 'none', background: 'none', color: '#00695c', cursor: 'pointer', fontSize: 12, padding: '2px 4px', fontWeight: 700 }}
+                title="LV/LV変圧器を追加">⊕TR</button>
             )}
             <button onClick={e => { e.stopPropagation(); onDelete(node.id); }}
               style={{ border: 'none', background: 'none', color: '#f44336', cursor: 'pointer', fontSize: 14, padding: '2px 6px' }}>×</button>
@@ -5217,8 +5385,8 @@ function FeedLinkEditor({ feedLinks, nodes, allResults, groups, onAddFeedLink, o
   const handleAdd = () => {
     if (!fromNodeId || !toNodeId || fromNodeId === toNodeId) return;
     /* 同一ツリー内は不可 */
-    const fromAnc = findAncestorTransformer(nodes, fromNodeId);
-    const toAnc = findAncestorTransformer(nodes, toNodeId);
+    const fromAnc = findRootTransformer(nodes, fromNodeId);
+    const toAnc = findRootTransformer(nodes, toNodeId);
     if (fromAnc && toAnc && fromAnc.id === toAnc.id) return;
     onAddFeedLink({ id: genId(), fromNodeId, toNodeId, label: label.trim() });
     setFromNodeId(''); setToNodeId(''); setLabel(''); setShowForm(false);
@@ -6456,7 +6624,9 @@ function App() {
       setNodes(prev => updateNode(prev, selectedId, { trunk: { ...trunkParams } }));
     } else if (node.type === 'transformer') {
       setNodes(prev => {
-        let updated = updateNode(prev, selectedId, { transformer: { ...trParams } });
+        const cleanParams = { ...trParams };
+        delete cleanParams._parentTrunkId;
+        let updated = updateNode(prev, selectedId, { transformer: cleanParams });
         if (node.transformer.secondaryV !== trParams.secondaryV) {
           const desc = getDescendants(updated, selectedId);
           for (const d of desc) {
@@ -6580,6 +6750,22 @@ function App() {
       if (grp && trParams.name && grp.name !== trParams.name) {
         setGroups(prev => prev.map(g => g.id === grp.id ? { ...g, name: trParams.name } : g));
       }
+    } else if (trParams.category === 'lv') {
+      /* LV/LV変圧器: trunk の子として追加 (§19-11b) */
+      const parentTrunkId = trParams._parentTrunkId || null;
+      const cleanParams = { ...trParams };
+      delete cleanParams._parentTrunkId;
+      const newId = genId();
+      setNodes(prev => {
+        return addNode(prev, {
+          id: newId, type: 'transformer', parentId: parentTrunkId,
+          order: getChildren(prev, parentTrunkId).length,
+          ts: new Date().toISOString(), externalRef: null,
+          transformer: cleanParams,
+          canvas: null
+        });
+      });
+      resetToNewLoad();
     } else {
       const newId = genId();
       setNodes(prev => {
@@ -6609,12 +6795,29 @@ function App() {
   };
 
   /* --- ツリー: 子ノード追加 --- */
-  const handleAddChild = (parentNode) => {
+  const handleAddChild = (parentNode, childType) => {
     if (parentNode.type === 'transformer') {
       setSelectedId(null);
       setEditMode('trunk');
       const secV = parentNode.transformer?.secondaryV || 210;
       setTrunkParams({ ...DEFAULT_TRUNK_PARAMS, voltage: secV, system: secV <= 210 ? '三相3線式' : '三相3線式' });
+    } else if (parentNode.type === 'trunk' && childType === 'lv_transformer') {
+      /* LV/LV変圧器を追加 (§19-11) */
+      setSelectedId(null);
+      setEditMode('transformer');
+      const pV = parentNode.trunk?.voltage || 210;
+      const secV = pV === 420 || pV === 440 || pV === 400 ? 210 : 105;
+      const auto = (() => {
+        const key = String(DEFAULT_LV_TR_PARAMS.capacity_kVA);
+        const d = TR_RATINGS.lv_three_phase?.data[key];
+        return d ? { pctZ: d.pct_z, xrRatio: d.xr_ratio } : { pctZ: 2.40, xrRatio: 0.60 };
+      })();
+      setTrParams({
+        ...DEFAULT_LV_TR_PARAMS,
+        primaryV: pV, secondaryV: secV,
+        pctZ: auto.pctZ, xrRatio: auto.xrRatio,
+        _parentTrunkId: parentNode.id /* 親trunkを記憶 */
+      });
     } else if (parentNode.type === 'trunk') {
       setSelectedId(null);
       setEditMode('load');
@@ -6693,7 +6896,7 @@ function App() {
               n.trunk = { ...n.trunk, icuClass: n.trunk.icuClass || 'standard', branchName: n.trunk.branchName || '', branchMainMCCB: n.trunk.branchMainMCCB || '自動' };
             }
             if (n.type === 'transformer' && n.transformer) {
-              n.transformer = { ...n.transformer, hvSystem: { cableType: null, cableSize_mm2: null, totalCableLength_km: null, capacitance_uF_per_km: null, vcbTripTime_s: 1.0, ...(n.transformer.hvSystem || {}) }, lossAuto: n.transformer.lossAuto !== undefined ? n.transformer.lossAuto : true, wi_W: n.transformer.wi_W || null, wc_W: n.transformer.wc_W || null, diversityFactor: n.transformer.diversityFactor || 100, annualLoadFactor: n.transformer.annualLoadFactor || null };
+              n.transformer = { ...n.transformer, category: n.transformer.category || 'hv', hvSystem: { cableType: null, cableSize_mm2: null, totalCableLength_km: null, capacitance_uF_per_km: null, vcbTripTime_s: 1.0, ...(n.transformer.hvSystem || {}) }, lossAuto: n.transformer.lossAuto !== undefined ? n.transformer.lossAuto : true, wi_W: n.transformer.wi_W || null, wc_W: n.transformer.wc_W || null, diversityFactor: n.transformer.diversityFactor || 100, annualLoadFactor: n.transformer.annualLoadFactor || null };
             }
             return { ...n, id: newId, canvas: n.canvas || null };
           }).map(n => ({
